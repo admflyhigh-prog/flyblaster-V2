@@ -1,0 +1,8 @@
+{
+  "permissions": {
+    "allow": [
+      "Bash(open /Users/rasidmaasom/Downloads/fly-blaster-ui/index.html)",
+      "Bash(open /Users/rasidmaasom/Downloads/fly-blaster-ui/index-blast.html)"
+    ]
+  }
+}

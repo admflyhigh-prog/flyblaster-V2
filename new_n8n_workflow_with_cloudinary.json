@@ -1,0 +1,244 @@
+{
+  "name": "Fly Blaster - WhatsApp Blast System [Cloudinary Backend]",
+  "nodes": [
+    {
+      "parameters": {
+        "path": "start-campaign",
+        "options": {
+          "responseCode": 200,
+          "responseData": "Campaign started"
+        }
+      },
+      "id": "webhook-trigger",
+      "name": "start-campaign",
+      "type": "n8n-nodes-base.webhook",
+      "typeVersion": 1.1,
+      "position": [250, 360]
+    },
+    {
+      "parameters": {
+        "operation": "executeQuery",
+        "query": "SELECT * FROM can_send_messages(100);"
+      },
+      "id": "check-limit",
+      "name": "Check Daily Limit",
+      "type": "n8n-nodes-base.postgres",
+      "typeVersion": 2.2,
+      "position": [450, 360]
+    },
+    {
+      "parameters": {
+        "conditions": {
+          "options": {
+            "caseSensitive": true,
+            "leftValueString": "",
+            "typeValidation": "strict"
+          },
+          "conditions": [
+            {
+              "id": "90ba95df-32cf-4bc1-9031-bb666ad63d37",
+              "leftValue": "={{ $json.can_send }}",
+              "rightValue": "",
+              "operator": "true"
+            }
+          ],
+          "combinator": "and"
+        },
+        "options": {}
+      },
+      "id": "limit-safe",
+      "name": "Is Limit Safe?",
+      "type": "n8n-nodes-base.if",
+      "typeVersion": 2.2,
+      "position": [650, 360]
+    },
+    {
+      "parameters": {
+        "operation": "executeQuery",
+        "query": "SELECT \n  camp.name AS campaign_name,\n  t.message_text,\n  t.media_url,\n  t.media_type,\n  rec.name AS recipient_name,\n  rec.phone AS recipient_phone,\n  camp.id AS campaign_id,\n  rec.id AS contact_id\nFROM campaigns camp\nJOIN templates t ON camp.template_id = t.id\nJOIN group_contacts gc ON camp.group_id = gc.group_id\nJOIN contacts rec ON gc.contact_id = rec.id\nWHERE camp.id = '{{ $('start-campaign').first().json.campaign_id }}';"
+      },
+      "id": "get-recipients",
+      "name": "Get Campaign & Recipients",
+      "type": "n8n-nodes-base.postgres",
+      "typeVersion": 2.2,
+      "position": [850, 360]
+    },
+    {
+      "parameters": {
+        "operation": "executeQuery",
+        "query": "UPDATE campaigns \nSET status = 'sending', started_at = NOW() \nWHERE id = '{{ $('start-campaign').first().json.campaign_id }}';"
+      },
+      "id": "set-sending",
+      "name": "Set Status to Sending",
+      "type": "n8n-nodes-base.postgres",
+      "typeVersion": 2.2,
+      "position": [1050, 360]
+    },
+    {
+      "parameters": {
+        "batchSize": 1,
+        "options": {}
+      },
+      "id": "loop-contacts",
+      "name": "Loop Contacts",
+      "type": "n8n-nodes-base.splitInBatches",
+      "typeVersion": 3,
+      "position": [1250, 360]
+    },
+    {
+      "parameters": {
+        "conditions": {
+          "options": {
+            "caseSensitive": true,
+            "leftValueString": "",
+            "typeValidation": "strict"
+          },
+          "conditions": [
+            {
+              "id": "a901ffc2-3e2c-473d-82d8-bd2304ba59df",
+              "leftValue": "={{ $json.media_url }}",
+              "rightValue": "",
+              "operator": "isNotEmpty"
+            }
+          ],
+          "combinator": "and"
+        },
+        "options": {}
+      },
+      "id": "has-media",
+      "name": "Has Media?",
+      "type": "n8n-nodes-base.if",
+      "typeVersion": 2.2,
+      "position": [1450, 360]
+    },
+    {
+      "parameters": {
+        "operation": "sendText",
+        "session": "default",
+        "chatId": "={{ $json.recipient_phone }}@c.us",
+        "text": "={{ $json.message_text }}"
+      },
+      "id": "waha-send-text",
+      "name": "WAHA Send Text",
+      "type": "@waha/n8n-nodes-waha.waha",
+      "typeVersion": 1,
+      "position": [1650, 260]
+    },
+    {
+      "parameters": {
+        "operation": "upload",
+        "file": "={{ $json.media_url }}",
+        "options": {}
+      },
+      "id": "cloudinary-upload",
+      "name": "Cloudinary Upload",
+      "type": "n8n-nodes-base.cloudinary",
+      "typeVersion": 1,
+      "position": [1650, 460]
+    },
+    {
+      "parameters": {
+        "operation": "sendImage",
+        "session": "default",
+        "chatId": "={{ $json.recipient_phone }}@c.us",
+        "file": "={{ $('Cloudinary Upload').first().json.secure_url }}",
+        "caption": "={{ $json.message_text }}"
+      },
+      "id": "waha-send-image",
+      "name": "WAHA Send Image",
+      "type": "@waha/n8n-nodes-waha.waha",
+      "typeVersion": 1,
+      "position": [1850, 460]
+    },
+    {
+      "parameters": {
+        "operation": "executeQuery",
+        "query": "INSERT INTO message_logs (campaign_id, contact_id, phone, contact_name, status, sent_at)\nVALUES (\n  '{{ $json.campaign_id }}',\n  '{{ $json.contact_id }}',\n  '{{ $json.recipient_phone }}',\n  '{{ $json.recipient_name }}',\n  'sent',\n  NOW()\n);"
+      },
+      "id": "log-sent",
+      "name": "Log Message Sent",
+      "type": "n8n-nodes-base.postgres",
+      "typeVersion": 2.2,
+      "position": [2100, 360]
+    },
+    {
+      "parameters": {
+        "operation": "executeQuery",
+        "query": "SELECT increment_message_count();"
+      },
+      "id": "increment-counter",
+      "name": "Increment Daily Counter",
+      "type": "n8n-nodes-base.postgres",
+      "typeVersion": 2.2,
+      "position": [2300, 360]
+    },
+    {
+      "parameters": {
+        "amount": 3
+      },
+      "id": "throttle-delay",
+      "name": "Throttle Delay",
+      "type": "n8n-nodes-base.wait",
+      "typeVersion": 1,
+      "position": [2500, 360]
+    },
+    {
+      "parameters": {
+        "operation": "executeQuery",
+        "query": "UPDATE campaigns \nSET \n  status = 'completed', \n  completed_at = NOW(),\n  sent_count = (SELECT COUNT(*) FROM message_logs WHERE campaign_id = '{{ $('start-campaign').first().json.campaign_id }}' AND status = 'sent'),\n  failed_count = (SELECT COUNT(*) FROM message_logs WHERE campaign_id = '{{ $('start-campaign').first().json.campaign_id }}' AND status = 'failed'),\n  total_recipients = (SELECT COUNT(*) FROM message_logs WHERE campaign_id = '{{ $('start-campaign').first().json.campaign_id }}')\nWHERE id = '{{ $('start-campaign').first().json.campaign_id }}';"
+      },
+      "id": "mark-completed",
+      "name": "Mark Campaign Completed",
+      "type": "n8n-nodes-base.postgres",
+      "typeVersion": 2.2,
+      "position": [1450, 160]
+    }
+  ],
+  "connections": {
+    "start-campaign": {
+      "main": [[{ "node": "Check Daily Limit", "type": "main", "index": 0 }]]
+    },
+    "Check Daily Limit": {
+      "main": [[{ "node": "Is Limit Safe?", "type": "main", "index": 0 }]]
+    },
+    "Is Limit Safe?": {
+      "main": [[{ "node": "Get Campaign & Recipients", "type": "main", "index": 0 }]]
+    },
+    "Get Campaign & Recipients": {
+      "main": [[{ "node": "Set Status to Sending", "type": "main", "index": 0 }]]
+    },
+    "Set Status to Sending": {
+      "main": [[{ "node": "Loop Contacts", "type": "main", "index": 0 }]]
+    },
+    "Loop Contacts": {
+      "main": [
+        [{ "node": "Mark Campaign Completed", "type": "main", "index": 0 }],
+        [{ "node": "Has Media?", "type": "main", "index": 1 }]
+      ]
+    },
+    "Has Media?": {
+      "main": [
+        [{ "node": "Cloudinary Upload", "type": "main", "index": 0 }],
+        [{ "node": "WAHA Send Text", "type": "main", "index": 0 }]
+      ]
+    },
+    "WAHA Send Text": {
+      "main": [[{ "node": "Log Message Sent", "type": "main", "index": 0 }]]
+    },
+    "Cloudinary Upload": {
+      "main": [[{ "node": "WAHA Send Image", "type": "main", "index": 0 }]]
+    },
+    "WAHA Send Image": {
+      "main": [[{ "node": "Log Message Sent", "type": "main", "index": 0 }]]
+    },
+    "Log Message Sent": {
+      "main": [[{ "node": "Increment Daily Counter", "type": "main", "index": 0 }]]
+    },
+    "Increment Daily Counter": {
+      "main": [[{ "node": "Throttle Delay", "type": "main", "index": 0 }]]
+    },
+    "Throttle Delay": {
+      "main": [[{ "node": "Loop Contacts", "type": "main", "index": 0 }]]
+    }
+  }
+}
