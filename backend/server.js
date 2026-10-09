@@ -134,12 +134,17 @@ app.get('/api/health', async (req, res) => {
 
 app.listen(PORT, async () => {
   console.log(`[boot] Fly Blaster backend listening on :${PORT}`);
-  try {
-    await pool.query('SELECT 1');
-    console.log(`[boot] MySQL connected (${DB_HOST}:${DB_PORT}/${DB_NAME})`);
-    await ensureAdmin();
-  } catch (e) {
-    console.error('[boot] DB connection failed:', e.message);
+  let connected = false;
+  while (!connected) {
+    try {
+      await pool.query('SELECT 1');
+      console.log(`[boot] MySQL connected (${DB_HOST}:${DB_PORT}/${DB_NAME})`);
+      await ensureAdmin();
+      connected = true;
+    } catch (e) {
+      console.log('[boot] Waiting for MySQL connection:', e.message);
+      await new Promise(r => setTimeout(r, 3000));
+    }
   }
 });
 
