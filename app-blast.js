@@ -28,6 +28,7 @@ const ICON = {
   arrowLeft: '<svg viewBox="0 0 24 24" width="14" height="14" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round"><path d="M19 12H5M12 19l-7-7 7-7"/></svg>',
   shield: '<svg viewBox="0 0 24 24" width="15" height="15" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M12 22s8-4 8-10V5l-8-3-8 3v7c0 6 8 10 8 10z"/></svg>',
   info: '<svg viewBox="0 0 24 24" width="15" height="15" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="10"/><path d="M12 16v-4M12 8h.01"/></svg>',
+  mail: '<svg viewBox="0 0 24 24" width="15" height="15" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M4 4h16c1.1 0 2 .9 2 2v12c0 1.1-.9 2-2 2H4c-1.1 0-2-.9-2-2V6c0-1.1.9-2 2-2z"/><polyline points="22,6 12,13 2,6"/></svg>',
 };
 
 /* ---------- Pastel palette ---------- */
@@ -79,7 +80,7 @@ function uid() {
 /* ---------- CSV helpers ---------- */
 
 function downloadTemplate() {
-  const csv = "name,phone_number\nAhmad bin Ali,+60123456789\nSiti Nurhaliza,+60129876543\n";
+  const csv = "name,phone_number,email\nAhmad bin Ali,+60123456789,ahmad@email.com\nSiti Nurhaliza,+60129876543,siti@email.com\n";
   const blob = new Blob([csv], { type: "text/csv;charset=utf-8;" });
   const url = URL.createObjectURL(blob);
   const link = document.createElement("a");
@@ -120,8 +121,13 @@ function extractPhoneNumbers(rows) {
     .map(r => {
       const phone = r.phone_number || r.phone || r["phone number"];
       const name = r.name || '';
+      const email = r.email || r["email address"] || '';
       if (!phone) return null;
-      return name ? { name: String(name).trim(), phone: String(phone).trim() } : { phone: String(phone).trim() };
+      return { 
+        name: String(name).trim(), 
+        phone: String(phone).trim(),
+        email: String(email).trim()
+      };
     })
     .filter(Boolean);
 }
@@ -174,81 +180,108 @@ function processCsvNumbers(numbers) {
 
 /* ---------- App state ---------- */
 
+/* Backend API client — replaces Supabase + n8n.
+   The backend (backend/server.js) talks to the dedicated MySQL + WAHA. */
+const API_BASE = "http://localhost:8091/api";
 
-const SUPABASE_URL = "https://jgmyzplxesjtnhioqmtf.supabase.co";
-const SUPABASE_KEY = "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6ImpnbXl6cGx4ZXNqdG5oaW9xbXRmIiwicm9sZSI6ImFub24iLCJpYXQiOjE3ODIzNjcyMTQsImV4cCI6MjA5Nzk0MzIxNH0.shsKSmQWt1KcSCV3EYNhgCZi-3wS0Rd20GyneM4jNMc";
-const supabaseClient = window.supabase ?
-  window.supabase.createClient(SUPABASE_URL, SUPABASE_KEY) : null;
+let authToken = localStorage.getItem("fly_blaster_token") || null;
 
+async function api(path, options = {}) {
+  const headers = { "Content-Type": "application/json", ...(options.headers || {}) };
+  if (authToken) headers["Authorization"] = "Bearer " + authToken;
+  const res = await fetch(API_BASE + path, { ...options, headers });
+  const isJson = (res.headers.get("content-type") || "").includes("application/json");
+  const body = isJson ? await res.json() : null;
+  if (!res.ok) {
+    const err = new Error((body && (body.error || body.message)) || `API error ${res.status}`);
+    err.status = res.status;
+    throw err;
+  }
+  return body;
+}
 
-async function syncFromSupabase() {
-  if (!supabaseClient) return;
+async function syncFromBackend() {
+  if (!authToken) return;
   try {
-    const { data: gData, error: gErr } = await supabaseClient.from('groups').select('*');
-    const { data: cData, error: cErr } = await supabaseClient.from('contacts').select('*');
-    const { data: gcData, error: gcErr } = await supabaseClient.from('group_contacts').select('*');
+    const data = await api("/sync");
 
-
-    if (!gErr && !cErr && !gcErr && gData && cData && gcData) {
-      const contactsMap = {};
-      cData.forEach(c => {
-        contactsMap[c.id] = { id: c.id, name: c.name, phone: c.phone };
-      });
-
-      groups = gData.map(g => {
-        const matchingContactIds = gcData.filter(gc => gc.group_id === g.id).map(gc => gc.contact_id);
-        const groupContacts = matchingContactIds.map(id => contactsMap[id]).filter(Boolean);
-        return {
-          id: g.id,
-          name: g.name,
-          contacts: groupContacts,
-          created: new Date(g.created_at).toISOString().split('T')[0]
-        };
-      });
+    // 1. Settings
+    if (data.settings) {
+      if (data.settings.daily_group_limit) {
+        dailyStats.limit = parseInt(data.settings.daily_group_limit, 10);
+      }
+      if (data.settings.waha_session) {
+        settingsState.wahaSession = data.settings.waha_session;
+      }
     }
 
-    const { data: tData, error: tErr } = await supabaseClient.from('templates').select('*');
-    if (!tErr && tData) {
-      templates = tData.map(t => ({
-        id: t.id,
-        name: t.name,
-        message: t.message_text,
-        hasMedia: !!t.media_url,
-        mediaUrl: t.media_url || "",
-        created: new Date(t.created_at).toISOString().split('T')[0]
+    // 2. Groups (with contacts + interaction flags)
+    if (data.groups) {
+      groups = data.groups.map(g => ({
+        id: g.id,
+        name: g.name,
+        wahaJid: g.wahaJid || null,
+        isImported: !!g.isImported,
+        contacts: (g.contacts || []).map(c => ({
+          id: c.id,
+          name: c.name,
+          phone: c.phone,
+          email: c.email || "",
+          hasInteraction: !!c.hasInteraction,
+          interactions: c.interactions || { inbound: 0, outbound: 0, group: 0 }
+        })),
+        created: g.created || ""
       }));
     }
 
-    const { data: campData, error: campErr } = await supabaseClient.from('campaigns').select('*');
-    if (!campErr && campData) {
-      campaigns = campData.map(c => {
-        const matchingGroup = groups.find(g => g.id === c.group_id);
-        const totalCount = matchingGroup ? matchingGroup.contacts.length : c.total_recipients || 0;
-        return {
-          id: c.id,
-          name: c.name,
-          groupId: c.group_id,
-          templateId: c.template_id,
-          status: (c.status || 'pending').trim().toLowerCase(),
-          totalRecipients: totalCount,
-          sentCount: c.sent_count || 0,
-          failedCount: c.failed_count || 0,
-          created: new Date(c.created_at).toISOString().split('T')[0],
-          started: c.started_at ? new Date(c.started_at).toISOString().replace('T', ' ').substring(0, 16) : null,
-          completed: c.completed_at ? new Date(c.completed_at).toISOString().replace('T', ' ').substring(0, 16) : null
-        };
-      });
+    // 3. Templates
+    if (data.templates) {
+      templates = data.templates.map(t => ({
+        id: t.id,
+        name: t.name,
+        message: t.message,
+        hasMedia: !!t.hasMedia,
+        mediaUrl: t.mediaUrl || "",
+        channel: t.channel || "whatsapp",
+        emailSubject: t.emailSubject || "",
+        created: t.created || ""
+      }));
     }
-    const todayStr = new Date().toISOString().split('T')[0];
-    const sentToday = campaigns
-      .filter(c => c.created === todayStr)
-      .reduce((sum, c) => sum + (c.sentCount || 0), 0);
 
-    dailyStats.messagesSent = sentToday;
+    // 4. Campaigns
+    if (data.campaigns) {
+      campaigns = data.campaigns.map(c => ({
+        id: c.id,
+        name: c.name,
+        groupIds: c.groupIds || [],
+        groupId: c.groupId || null,
+        templateId: c.templateId,
+        status: c.status || 'pending',
+        sentCount: c.sentCount || 0,
+        failedCount: c.failedCount || 0,
+        channel: c.channel || 'whatsapp',
+        onlyInteractions: !!c.onlyInteractions,
+        totalRecipients: c.totalRecipients || 0,
+        created: c.created || "",
+        started: c.started || null,
+        completed: c.completed || null
+      }));
+    }
+
+    // 5. Stats
+    if (data.dailyStats) {
+      dailyStats.limit = data.dailyStats.limit;
+      dailyStats.messagesSent = data.dailyStats.messagesSent;
+    }
+    if (data.totalStats) {
+      dashboardStats = data.totalStats;
+    }
   } catch (err) {
-    console.error("Failed to sync from Supabase:", err);
+    console.error("Failed to sync from backend:", err);
   }
 }
+
+let dashboardStats = { messagesSent: 0, totalContacts: 0, totalCampaigns: 0, failedMessages: 0 };
 
 let isEditingGroup = false;
 let selectedContacts = new Set();
@@ -343,6 +376,8 @@ let dailyStats = {
 };
 
 let activeNav = "dashboard";
+let activeTemplateFilter = "all";
+let activeCampaignFilter = "all";
 let activeGroupId = null;
 let activeCampaignId = null;
 let modal = null;
@@ -391,6 +426,8 @@ function renderGroupsPage() {
           <p>Organize your contacts into groups for targeted campaigns.</p>
         </div>
         <div class="header-actions">
+          <button class="btn btn-ghost" data-action="scan-interactions">${ICON.shield} Scan Prior Interactions</button>
+          <button class="btn btn-ghost" data-action="import-whatsapp-group">${ICON.download} Import WhatsApp Group</button>
           <button class="btn btn-primary" data-action="create-group">${ICON.plus} New Group</button>
         </div>
       </div>
@@ -419,9 +456,10 @@ function renderGroupDetailPage(groupId) {
 
   const contactRows = group.contacts.map((contact, idx) => {
     const isEditingThisRow = editingContactIndex === idx;
+    const gridCols = isEditingGroup ? '50px 1.5fr 1.2fr 1.5fr 80px' : '1.5fr 1.2fr 1.5fr 80px';
 
     return `
-      <div class="table-row">
+      <div class="table-row" style="grid-template-columns: ${gridCols};">
         ${isEditingGroup ? `
           <div style="display: flex; align-items: center; justify-content: center;">
             <input type="checkbox" class="contact-checkbox" data-index="${idx}" ${selectedContacts.has(idx) ? 'checked' : ''} data-action="toggle-contact-checkbox" />
@@ -442,6 +480,13 @@ function renderGroupDetailPage(groupId) {
             <input type="text" id="inline-contact-phone" class="text-input" style="height: 32px; border: 1px solid var(--border); border-radius: 6px; padding: 4px 8px; font-size:13px; width: 100%; max-width: 200px;" value="${escapeHtml(contact.phone)}" />
           ` : `
             ${escapeHtml(contact.phone)}
+          `}
+        </div>
+        <div class="contact-email-cell">
+          ${isEditingThisRow ? `
+            <input type="text" id="inline-contact-email" class="text-input" style="height: 32px; border: 1px solid var(--border); border-radius: 6px; padding: 4px 8px; font-size:13px; width: 100%; max-width: 200px;" value="${escapeHtml(contact.email || '')}" placeholder="e.g. parent@email.com" />
+          ` : `
+            ${escapeHtml(contact.email || '—')}
           `}
         </div>
         <div class="actions-cell">
@@ -498,7 +543,7 @@ function renderGroupDetailPage(groupId) {
       </div>
 
       <div class="table-card ${isEditingGroup ? 'edit-active' : ''}">
-        <div class="table-head">
+        <div class="table-head" style="grid-template-columns: ${isEditingGroup ? '50px 1.5fr 1.2fr 1.5fr 80px' : '1.5fr 1.2fr 1.5fr 80px'};">
           ${isEditingGroup ? `
             <div style="display: flex; align-items: center; justify-content: center;">
               <input type="checkbox" id="select-all-contacts" ${allSelected ? 'checked' : ''} data-action="toggle-select-all-contacts" />
@@ -506,6 +551,7 @@ function renderGroupDetailPage(groupId) {
           ` : ''}
           <div>Name</div>
           <div>Phone Number</div>
+          <div>Email</div>
           <div style="text-align:right; display: flex; justify-content: flex-end; align-items: center; gap: 12px;">
             ${isEditingGroup && selectedContacts.size > 0 ? `
               <button class="btn btn-danger-sm" data-action="delete-selected-contacts" style="background:var(--red); color:white; border:none; border-radius:6px; padding:5px 10px; font-size:11px; font-weight:600; cursor:pointer; display:flex; align-items:center; gap:4px; height: 26px;">${ICON.trash} Delete Checked (${selectedContacts.size})</button>
@@ -639,16 +685,28 @@ function renderDashboardPage() {
 /* ---------- Page: Templates ---------- */
 
 function renderTemplatesPage() {
-  const rows = templates.map(t => {
+  const filteredTemplates = templates.filter(t => activeTemplateFilter === 'all' || t.channel === activeTemplateFilter);
+
+  const rows = filteredTemplates.map(t => {
+    const isEmail = t.channel === 'email';
     return `
       <div class="template-card-compact">
         <div class="template-compact-left">
-          ${t.hasMedia ? `<div class="template-thumb"><img src="${t.mediaUrl}" alt="Preview" /></div>` :
-        `<div class="template-thumb template-thumb-text">${ICON.messageSquare}</div>`}
+          ${isEmail ? `<div class="template-thumb template-thumb-text" style="color:var(--blue); background:#e0f2fe;">${ICON.mail}</div>` : 
+            (t.hasMedia ? `<div class="template-thumb"><img src="${t.mediaUrl}" alt="Preview" /></div>` :
+              `<div class="template-thumb template-thumb-text">${ICON.messageSquare}</div>`)}
           <div class="template-compact-info">
             <div class="template-compact-name">${escapeHtml(t.name)}</div>
-            <div class="template-compact-preview">${escapeHtml(t.message.substring(0, 80))}${t.message.length > 80 ? '...' : ''}</div>
-            <div class="template-compact-meta">${t.hasMedia ? 'With media' : 'Text only'} • ${formatDate(t.created)}</div>
+            <div class="template-compact-preview">
+              ${isEmail && t.emailSubject ? `<div style="font-size: 11.5px; font-weight: 700; color: var(--text-muted); margin-bottom: 2px;">Subject: ${escapeHtml(t.emailSubject)}</div>` : ''}
+              ${escapeHtml(t.message.substring(0, 80))}${t.message.length > 80 ? '...' : ''}
+            </div>
+            <div class="template-compact-meta" style="display: flex; align-items: center; gap: 6px; flex-wrap: wrap;">
+              <span style="font-size: 10px; font-weight: 600; padding: 1px 6px; border-radius: 12px; background: ${isEmail ? '#f0f9ff' : '#f0fdf4'}; color: ${isEmail ? '#0284c7' : '#16a34a'}; border: 1px solid ${isEmail ? '#e0f2fe' : '#dcfce7'}; display: inline-flex; align-items: center; justify-content: center; line-height: 1.2;">
+                ${isEmail ? 'Email' : 'WhatsApp'}
+              </span>
+              <span>${isEmail ? 'Subject & Body' : (t.hasMedia ? 'With media' : 'Text only')} • Created ${formatDate(t.created)}</span>
+            </div>
           </div>
         </div>
         <div class="template-compact-actions">
@@ -670,8 +728,14 @@ function renderTemplatesPage() {
         </div>
       </div>
 
+      <div class="filter-bar" style="display: flex; gap: 8px; margin-bottom: 20px; border-bottom: 1px solid var(--border-soft); padding-bottom: 12px;">
+        <button class="filter-pill ${activeTemplateFilter === 'all' ? 'active' : ''}" data-action="filter-templates" data-value="all" style="background: none; border: none; padding: 6px 14px; font-size: 13.5px; font-weight: 600; cursor: pointer; color: ${activeTemplateFilter === 'all' ? 'var(--violet)' : 'var(--text-muted)'}; border-bottom: 2px solid ${activeTemplateFilter === 'all' ? 'var(--violet)' : 'transparent'}; border-radius: 0;">All</button>
+        <button class="filter-pill ${activeTemplateFilter === 'whatsapp' ? 'active' : ''}" data-action="filter-templates" data-value="whatsapp" style="background: none; border: none; padding: 6px 14px; font-size: 13.5px; font-weight: 600; cursor: pointer; color: ${activeTemplateFilter === 'whatsapp' ? 'var(--violet)' : 'var(--text-muted)'}; border-bottom: 2px solid ${activeTemplateFilter === 'whatsapp' ? 'var(--violet)' : 'transparent'}; border-radius: 0;">WhatsApp</button>
+        <button class="filter-pill ${activeTemplateFilter === 'email' ? 'active' : ''}" data-action="filter-templates" data-value="email" style="background: none; border: none; padding: 6px 14px; font-size: 13.5px; font-weight: 600; cursor: pointer; color: ${activeTemplateFilter === 'email' ? 'var(--violet)' : 'var(--text-muted)'}; border-bottom: 2px solid ${activeTemplateFilter === 'email' ? 'var(--violet)' : 'transparent'}; border-radius: 0;">Email</button>
+      </div>
+
       <div class="templates-list">
-        ${templates.length ? rows : `<div class="empty-state-card">No templates yet. Create one to get started.</div>`}
+        ${filteredTemplates.length ? rows : `<div class="empty-state-card" style="border: 2px dashed var(--border); border-radius: 12px; padding: 40px; text-align: center; color: var(--text-muted);">No templates match the selected filter.</div>`}
       </div>
     </div>`;
 
@@ -681,6 +745,9 @@ function renderTemplatesPage() {
 /* ---------- Page: Campaigns ---------- */
 
 function renderCampaignsPage() {
+  const remaining = dailyStats.limit - dailyStats.messagesSent;
+  const percentage = (dailyStats.messagesSent / dailyStats.limit) * 100;
+
   const statusBadge = (status) => {
     const badges = {
       pending: `<span class="status-badge status-pending">${ICON.clock} Pending</span>`,
@@ -691,7 +758,9 @@ function renderCampaignsPage() {
     return badges[status] || badges.pending;
   };
 
-  const rows = campaigns.map(c => {
+  const filteredCampaigns = campaigns.filter(c => activeCampaignFilter === 'all' || c.channel === activeCampaignFilter);
+
+  const rows = filteredCampaigns.map(c => {
     const group = groups.find(g => g.id === c.groupId);
     const template = templates.find(t => t.id === c.templateId);
     const p = pastelFor(c.name);
@@ -701,8 +770,17 @@ function renderCampaignsPage() {
         <div class="campaign-row-cell campaign-name-cell">
           <div class="avatar" style="background:${p.bg};color:${p.text}">${initialsFor(c.name)}</div>
           <div>
-            <div class="campaign-name">${escapeHtml(c.name)}</div>
-            <div class="campaign-meta">${group?.name || 'Unknown Group'} • ${template?.name || 'Unknown Template'}</div>
+            <div class="campaign-title" style="font-size: 14.5px; font-weight: 650; color: var(--text); margin-bottom: 2px;">
+              ${escapeHtml(c.name)}
+            </div>
+            <div class="campaign-meta" style="display: flex; align-items: center; gap: 8px; flex-wrap: wrap; margin-top: 4px;">
+              <span style="font-size: 10px; font-weight: 600; padding: 1px 6px; border-radius: 12px; background: ${c.channel === 'email' ? '#f0f9ff' : '#f0fdf4'}; color: ${c.channel === 'email' ? '#0284c7' : '#16a34a'}; border: 1px solid ${c.channel === 'email' ? '#e0f2fe' : '#dcfce7'}; display: inline-flex; align-items: center; justify-content: center; line-height: 1.2;">
+                ${c.channel === 'email' ? 'Email' : 'WhatsApp'}
+              </span>
+              <span style="color: var(--text-muted); font-size: 12.5px;">
+                ${group?.name || 'Unknown Group'} • ${template?.name || 'Unknown Template'}
+              </span>
+            </div>
           </div>
         </div>
         <div class="campaign-row-cell campaign-status-cell">
@@ -713,53 +791,36 @@ function renderCampaignsPage() {
           ${c.failedCount > 0 ? `<span class="failed-text">${c.failedCount} failed</span>` : ''}
         </div>
         <div class="campaign-row-cell campaign-date-cell">
-          ${formatDate(c.created)}
+          <span class="date-text">${formatDate(c.created)}</span>
         </div>
         <div class="campaign-row-cell campaign-actions-cell">
-          ${c.status === 'pending' ? `<button class="btn btn-sm btn-primary-sm" data-action="start-campaign" data-id="${c.id}">${ICON.play} Start</button>` : ''}
-          <button class="btn btn-sm btn-ghost-sm" data-action="view-campaign" data-id="${c.id}">${ICON.eye} View</button>
-          <button class="icon-btn red" title="Delete" data-action="delete-campaign" data-id="${c.id}">${ICON.trash}</button>
+          <button class="btn btn-ghost-sm" data-action="view-campaign" data-id="${c.id}">${ICON.eye} View</button>
+          ${c.status === 'pending' ? `<button class="btn btn-primary-sm" data-action="start-campaign" data-id="${c.id}">${ICON.play} Start</button>` : ''}
+          <button class="icon-btn red" title="Delete campaign" data-action="delete-campaign" data-id="${c.id}">${ICON.trash}</button>
         </div>
       </div>`;
   }).join("");
 
-  // Calculate warnings
-  const remaining = dailyStats.limit - dailyStats.messagesSent;
-  const percentage = (dailyStats.messagesSent / dailyStats.limit) * 100;
-  let warningHtml = '';
-
-  if (percentage >= 80) {
-    warningHtml = `
-      <div class="alert-banner ${percentage >= 100 ? 'alert-danger' : 'alert-warning'}">
-        <div class="alert-icon">${ICON.alert}</div>
-        <div class="alert-content">
-          <div class="alert-title">${percentage >= 100 ? 'Daily Limit Reached!' : 'Approaching Daily Limit'}</div>
-          <div class="alert-text">
-            ${percentage >= 100
-        ? 'You have reached your daily message limit. Sending more may result in WhatsApp banning your number.'
-        : `You've sent ${dailyStats.messagesSent}/${dailyStats.limit} messages today. Only ${remaining} remaining.`
-      }
-          </div>
-        </div>
-      </div>`;
-  }
-
   const html = `
     <div class="wrap">
-      ${warningHtml}
-
       <div class="page-header">
         <div>
           <h1>Campaigns</h1>
-          <p>Create and manage your WhatsApp blast campaigns.</p>
+          <p>Create and manage your WhatsApp/Email blast campaigns.</p>
         </div>
-        <div class="header-actions">
+        <div class="header-actions" style="display: flex; align-items: center; gap: 16px;">
           <div class="daily-counter">
             <span class="counter-label">Today:</span>
             <span class="counter-value ${percentage >= 80 ? 'counter-warning' : ''}">${dailyStats.messagesSent}/${dailyStats.limit}</span>
           </div>
           <button class="btn btn-primary" data-action="create-campaign">${ICON.plus} New Campaign</button>
         </div>
+      </div>
+
+      <div class="filter-bar" style="display: flex; gap: 8px; margin-bottom: 20px; border-bottom: 1px solid var(--border-soft); padding-bottom: 12px;">
+        <button class="filter-pill ${activeCampaignFilter === 'all' ? 'active' : ''}" data-action="filter-campaigns" data-value="all" style="background: none; border: none; padding: 6px 14px; font-size: 13.5px; font-weight: 600; cursor: pointer; color: ${activeCampaignFilter === 'all' ? 'var(--violet)' : 'var(--text-muted)'}; border-bottom: 2px solid ${activeCampaignFilter === 'all' ? 'var(--violet)' : 'transparent'}; border-radius: 0;">All</button>
+        <button class="filter-pill ${activeCampaignFilter === 'whatsapp' ? 'active' : ''}" data-action="filter-campaigns" data-value="whatsapp" style="background: none; border: none; padding: 6px 14px; font-size: 13.5px; font-weight: 600; cursor: pointer; color: ${activeCampaignFilter === 'whatsapp' ? 'var(--violet)' : 'var(--text-muted)'}; border-bottom: 2px solid ${activeCampaignFilter === 'whatsapp' ? 'var(--violet)' : 'transparent'}; border-radius: 0;">WhatsApp</button>
+        <button class="filter-pill ${activeCampaignFilter === 'email' ? 'active' : ''}" data-action="filter-campaigns" data-value="email" style="background: none; border: none; padding: 6px 14px; font-size: 13.5px; font-weight: 600; cursor: pointer; color: ${activeCampaignFilter === 'email' ? 'var(--violet)' : 'var(--text-muted)'}; border-bottom: 2px solid ${activeCampaignFilter === 'email' ? 'var(--violet)' : 'transparent'}; border-radius: 0;">Email</button>
       </div>
 
       <div class="campaigns-table">
@@ -770,7 +831,7 @@ function renderCampaignsPage() {
           <div class="campaign-row-cell campaign-date-cell">Created</div>
           <div class="campaign-row-cell campaign-actions-cell">Actions</div>
         </div>
-        ${campaigns.length ? rows : `<div class="empty-state">No campaigns yet. Create one to start blasting!</div>`}
+        ${filteredCampaigns.length ? rows : `<div class="empty-state">No campaigns match the selected filter.</div>`}
       </div>
     </div>`;
 
@@ -783,7 +844,9 @@ function renderCampaignDetailPage(campaignId) {
   const campaign = campaigns.find(c => c.id === campaignId);
   if (!campaign) return;
 
-  const group = groups.find(g => g.id === campaign.groupId);
+  const groupIds = campaign.groupIds || (campaign.groupId ? [campaign.groupId] : []);
+  const campaignGroups = groups.filter(g => groupIds.includes(g.id));
+  const groupNames = campaignGroups.map(g => g.name).join(", ") || "Unknown";
   const template = templates.find(t => t.id === campaign.templateId);
 
   const statusBadge = {
@@ -794,8 +857,16 @@ function renderCampaignDetailPage(campaignId) {
   };
 
 
-  // Generate mock message logs for demo
-  const logs = group.contacts.map((contact, idx) => ({
+  // Generate unique contacts from all groups
+  const uniqueContactsMap = {};
+  campaignGroups.forEach(g => {
+    g.contacts.forEach(c => {
+      uniqueContactsMap[c.phone] = c;
+    });
+  });
+  const campaignContacts = Object.values(uniqueContactsMap);
+
+  const logs = campaignContacts.map((contact, idx) => ({
     name: contact.name,
     phone: contact.phone,
     status: campaign.status === 'completed' ? 'sent' : (campaign.status === 'sending' && idx < 2 ? 'sent' : 'pending'),
@@ -835,7 +906,7 @@ function renderCampaignDetailPage(campaignId) {
             </div>
             <div class="stat-item">
               ${ICON.users}
-              Group: <strong>${group?.name || 'Unknown'}</strong>
+              Groups: <strong>${escapeHtml(groupNames)}</strong>
             </div>
           </div>
         </div>
@@ -901,59 +972,54 @@ function renderBlastingPage() {
 /* ---------- Page: Settings ---------- */
 
 function renderSettingsPage() {
-  const { testPhoneNumber, isSandboxMode } = settingsState;
-
   const html = `
     <div class="wrap">
       <div class="header-row" style="margin-bottom: 24px;">
         <div>
           <h1>Settings</h1>
-          <p>Configure account parameters, sandbox environments, and system status.</p>
+          <p>Manage your WhatsApp senders and blast configuration.</p>
         </div>
       </div>
 
       <div class="settings-grid" style="display: grid; grid-template-columns: 1fr 1fr; gap: 24px; align-items: start;">
-        <!-- Testing & Sandbox Card -->
+        <!-- Configuration Card -->
         <div class="table-card" style="padding: 24px; display: flex; flex-direction: column; gap: 20px;">
           <h3 style="font-size: 16px; font-weight: 700; margin: 0; display: flex; align-items: center; gap: 8px; color: var(--text);">
-            ${ICON.shield} System Testing (Sandbox)
+            ${ICON.info} Blast Configuration
           </h3>
-          
-          <p style="font-size: 12.5px; color: var(--text-muted); margin: 0; line-height: 1.5;">
-            Sandbox mode redirects all outgoing messages to the configured test number to shield your actual contacts from test blasts.
-          </p>
 
           <div class="field">
-            <label class="checkbox-label" style="display: flex; align-items: center; gap: 10px; cursor: pointer; user-select: none;">
-              <input type="checkbox" id="settings-sandbox-toggle" ${isSandboxMode ? 'checked' : ''} style="width: 18px; height: 18px; cursor: pointer;" />
-              <span style="font-weight: 600; font-size: 13.5px; color: var(--text);">Enable Sandbox Mode</span>
-            </label>
-          </div>
-
-          <div class="field" id="settings-test-phone-field" style="display: ${isSandboxMode ? 'block' : 'none'}; transition: all 0.2s;">
-            <label class="field-label" style="font-weight: 600; font-size: 12px; color: var(--text-muted); text-transform: uppercase; margin-bottom: 6px; display: block;">Test Phone Number</label>
-            <input type="text" id="settings-test-phone" class="text-input" placeholder="e.g. +60123456789" value="${escapeHtml(testPhoneNumber || '')}" style="height: 38px; border-radius: 8px; border: 1px solid var(--border); padding: 8px 12px; font-size: 13.5px; width: 100%; max-width: 320px;" />
+            <label class="field-label" style="font-weight: 600; font-size: 12px; color: var(--text-muted); text-transform: uppercase; margin-bottom: 6px; display: block;">Default WAHA Session</label>
+            <input type="text" id="settings-waha-session" class="text-input" placeholder="e.g. Tester" value="${escapeHtml(settingsState.wahaSession || 'Tester')}" style="height: 38px; border-radius: 8px; border: 1px solid var(--border); padding: 8px 12px; font-size: 13.5px; width: 100%; max-width: 320px;" />
             <p style="font-size: 11px; color: var(--text-muted); margin-top: 4px; line-height: 1.4;">
-              Ensure this phone number starts with a plus (+) and country code (e.g. <strong>+60123456789</strong>).
+              Must match the session name configured in the backend (WAHA).
             </p>
           </div>
 
-          <button class="btn btn-primary" id="save-settings-btn" style="align-self: flex-start;">${ICON.check} Save Settings</button>
+          <div class="field" style="margin-top: 8px;">
+            <label class="field-label" style="font-weight: 600; font-size: 12px; color: var(--text-muted); text-transform: uppercase; margin-bottom: 6px; display: block;">Daily Group Limit</label>
+            <input type="number" id="settings-group-limit" class="text-input" placeholder="e.g. 5" value="${dailyStats.limit || 5}" style="height: 38px; border-radius: 8px; border: 1px solid var(--border); padding: 8px 12px; font-size: 13.5px; width: 100%; max-width: 320px;" />
+            <p style="font-size: 11px; color: var(--text-muted); margin-top: 4px; line-height: 1.4;">
+              Maximum number of unique contact groups targeted per day (default is <strong>5</strong>).
+            </p>
+          </div>
+
+          <button class="btn btn-primary" id="save-settings-btn" style="align-self: flex-start; margin-top: 10px;">${ICON.check} Save Settings</button>
         </div>
 
-        <!-- System Information Card -->
-        <div class="table-card" style="padding: 24px; display: flex; flex-direction: column; gap: 20px;">
-          <h3 style="font-size: 16px; font-weight: 700; margin: 0; display: flex; align-items: center; gap: 8px; color: var(--text);">
-            ${ICON.info} System Information
-          </h3>
+        <!-- WhatsApp Senders Table (like WAHA session list) -->
+        <div class="table-card" style="padding: 24px; display: flex; flex-direction: column; gap: 16px;">
+          <div style="display: flex; align-items: center; justify-content: space-between; gap: 12px; flex-wrap: wrap;">
+            <h3 style="font-size: 16px; font-weight: 700; margin: 0; display: flex; align-items: center; gap: 8px; color: var(--text);">
+              ${ICON.messageSquare} WhatsApp Senders
+            </h3>
+            <button class="btn btn-primary" id="waha-add-sender-btn" style="display: inline-flex; align-items: center; gap: 6px;">${ICON.plus} Add Sender</button>
+          </div>
           <p style="font-size: 12.5px; color: var(--text-muted); margin: 0; line-height: 1.5;">
-            Details about your currently configured backend integrations.
+            Each row is a WhatsApp number you can scan to connect as a sender. Scan the QR with WhatsApp, then save or delete.
           </p>
-          <div style="font-size: 13px; color: var(--text-muted); display: flex; flex-direction: column; gap: 12px; line-height: 1.5; background: var(--bg); padding: 16px; border-radius: 8px; border: 1px solid var(--border-soft);">
-            <div><strong>WAHA Server</strong>: <code style="background:var(--card); padding:2px 6px; border-radius:4px; font-size:12px;">http://150.109.5.90:3000</code></div>
-            <div><strong>WAHA Session</strong>: <code style="background:var(--card); padding:2px 6px; border-radius:4px; font-size:12px;">default</code></div>
-            <div><strong>n8n Webhook</strong>: <code style="background:var(--card); padding:2px 6px; border-radius:4px; font-size:12px;">https://flyblaster-n8n.o7brj8.easypanel.host</code></div>
-            <div><strong>Database</strong>: <code style="background:var(--card); padding:2px 6px; border-radius:4px; font-size:12px;">Supabase Postgres</code></div>
+          <div id="senders-table-wrap">
+            <div style="font-size: 13px; color: var(--text-muted); padding: 12px 0;">Loading senders...</div>
           </div>
         </div>
       </div>
@@ -962,31 +1028,173 @@ function renderSettingsPage() {
 
   document.getElementById("page-settings").innerHTML = html;
 
-  const sandboxToggle = document.getElementById("settings-sandbox-toggle");
-  const testPhoneField = document.getElementById("settings-test-phone-field");
-  const testPhoneInput = document.getElementById("settings-test-phone");
+  // Load senders table
+  loadSendersTable();
+
+  // Add sender
+  document.getElementById("waha-add-sender-btn")?.addEventListener("click", () => renderAddSenderModal());
+
   const saveBtn = document.getElementById("save-settings-btn");
+  saveBtn.addEventListener("click", async () => {
+    const wahaSession = document.getElementById("settings-waha-session").value.trim() || "Tester";
+    const groupLimit = parseInt(document.getElementById("settings-group-limit").value.trim(), 10) || 5;
 
-  sandboxToggle.addEventListener("change", () => {
-    testPhoneField.style.display = sandboxToggle.checked ? "block" : "none";
-  });
+    settingsState.wahaSession = wahaSession;
+    localStorage.setItem("fly_blaster_settings", JSON.stringify(settingsState));
 
-  saveBtn.addEventListener("click", () => {
-    const isSandbox = sandboxToggle.checked;
-    const testNum = testPhoneInput.value.trim();
-
-    if (isSandbox && !testNum) {
-      alert("A test phone number is required when Sandbox Mode is active.");
-      return;
+    try {
+      await api("/settings", { method: "PUT", body: JSON.stringify({ waha_session: wahaSession, daily_group_limit: String(groupLimit) }) });
+    } catch (err) {
+      console.error("Failed to save settings to backend:", err);
     }
 
-    settingsState.isSandboxMode = isSandbox;
-    settingsState.testPhoneNumber = isSandbox ? cleanPhoneNumber(testNum) : "";
-
-    localStorage.setItem("fly_blaster_settings", JSON.stringify(settingsState));
     alert("Settings saved successfully!");
+    await syncFromBackend();
     renderPage();
   });
+}
+
+/* ---------- Senders table (WAHA-style) ---------- */
+
+async function loadSendersTable() {
+  const wrap = document.getElementById("senders-table-wrap");
+  if (!wrap) return;
+  let senders = [];
+  try {
+    senders = await api("/senders");
+  } catch (err) {
+    wrap.innerHTML = `<div style="font-size: 13px; color: var(--red); padding: 12px 0;">Failed to load senders: ${escapeHtml(err.message)}</div>`;
+    return;
+  }
+
+  if (senders.length === 0) {
+    wrap.innerHTML = `<div style="font-size: 13px; color: var(--text-muted); padding: 12px 0;">No senders yet. Click "Add Sender" to scan your first WhatsApp number.</div>`;
+    return;
+  }
+
+  const rows = senders.map(s => {
+    const dotColor = s.connected ? "#10B981" : (s.error ? "#EF4444" : "#F59E0B");
+    const statusText = s.connected ? "Connected" : (s.error ? "Unreachable" : "Not connected");
+    return `
+      <div class="table-row" data-sender-id="${s.id}" style="display: grid; grid-template-columns: 1fr auto auto auto; gap: 12px; align-items: center; padding: 12px 14px; border-bottom: 1px solid var(--border-soft);">
+        <div style="min-width: 0;">
+          <div style="font-weight: 600; font-size: 13.5px; color: var(--text); display: flex; align-items: center; gap: 8px; flex-wrap: wrap;">
+            ${escapeHtml(s.name)}
+            ${s.isDefault ? `<span style="font-size: 10px; background: var(--violet-light); color: var(--violet); padding: 2px 6px; border-radius: 6px; font-weight: 700;">DEFAULT</span>` : ''}
+          </div>
+          <div style="font-size: 12px; color: var(--text-muted); margin-top: 2px; word-break: break-all;">
+            ${escapeHtml(s.phone || '— not scanned yet —')} · <code style="background:var(--bg); padding:1px 5px; border-radius:4px;">${escapeHtml(s.wahaSession)}</code>
+          </div>
+        </div>
+        <div style="display: flex; align-items: center; gap: 6px; font-size: 12.5px; color: var(--text-muted); white-space: nowrap;">
+          <span style="display:inline-block; width:9px; height:9px; border-radius:50%; background:${dotColor};"></span>
+          ${statusText}
+        </div>
+        <div style="display: flex; gap: 6px;">
+          <button class="btn-chip" data-action="scan-sender" data-id="${s.id}" style="white-space: nowrap; padding: 4px 10px; font-size: 12px;">${ICON.messageSquare} Scan</button>
+        </div>
+        <div style="display: flex; gap: 6px;">
+          <button class="icon-btn" title="Save / set default" data-action="save-sender" data-id="${s.id}" style="${s.isDefault ? 'opacity:0.4; pointer-events:none;' : ''}">${ICON.check}</button>
+          <button class="icon-btn red" title="Delete sender" data-action="delete-sender" data-id="${s.id}">${ICON.trash}</button>
+        </div>
+      </div>`;
+  }).join("");
+
+  wrap.innerHTML = `<div style="border: 1px solid var(--border); border-radius: 10px; overflow: hidden;">
+    <div class="table-head" style="display: grid; grid-template-columns: 1fr auto auto auto; gap: 12px; padding: 10px 14px; font-size: 11px; font-weight: 700; color: var(--text-muted); text-transform: uppercase; letter-spacing: 0.4px; background: var(--bg); border-bottom: 1px solid var(--border);">
+      <div>Sender</div><div>Status</div><div>Action</div><div>Manage</div>
+    </div>
+    ${rows}
+  </div>`;
+}
+
+/* ---------- Modal: Add Sender ---------- */
+
+function renderAddSenderModal() {
+  modal = { type: "add-sender" };
+  const body = `
+    <div style="display: flex; flex-direction: column; gap: 14px;">
+      <div class="field">
+        <label class="field-label">Sender Name <span class="req">*</span></label>
+        <input id="add-sender-name" class="text-input" type="text" placeholder="e.g. Suffian Flyhigh" style="height: 38px; border-radius: 8px; border: 1px solid var(--border); padding: 8px 12px; font-size: 13.5px; width: 100%;" />
+        <p style="font-size: 11px; color: var(--text-muted); margin-top: 4px; line-height: 1.4;">
+          A label for this WhatsApp sender (also used as the WAHA session name).
+        </p>
+      </div>
+      <div id="add-sender-result" style="font-size: 13px; color: var(--text-muted);"></div>
+    </div>
+  `;
+  const footer = `
+    <button class="btn btn-ghost" data-action="close-modal">Cancel</button>
+    <button class="btn btn-primary" id="add-sender-confirm" data-action="add-sender-confirmed">${ICON.check} Create & Scan</button>
+  `;
+  document.getElementById("modal-root").innerHTML = modalShell({
+    title: "Add WhatsApp Sender",
+    bodyHtml: body,
+    footerHtml: footer,
+    narrow: true
+  });
+}
+
+/* ---------- Modal: Scan Sender QR ---------- */
+
+function renderScanSenderQrModal(senderId, senderName) {
+  modal = { type: "scan-sender", senderId };
+  const body = `
+    <div style="display: flex; flex-direction: column; align-items: center; gap: 14px; text-align: center; padding: 8px 0;">
+      <h3 style="margin: 0; font-size: 15px; font-weight: 700; color: var(--text);">${escapeHtml(senderName)}</h3>
+      <p style="font-size: 13px; color: var(--text-muted); margin: 0; line-height: 1.5;">
+        Open <strong>WhatsApp</strong> → <strong>Linked Devices</strong> → <strong>Link a Device</strong> and scan.
+      </p>
+      <div id="scan-qr-box" style="width: 260px; height: 260px; border: 1px solid var(--border); border-radius: 12px; background: white; display: flex; align-items: center; justify-content: center; color: var(--text-muted); font-size: 13px;">
+        Connecting to WAHA...
+      </div>
+      <p style="font-size: 11.5px; color: var(--text-faint); margin: 0;">
+        QR refreshes automatically. Once connected, click Save to keep this sender.
+      </p>
+    </div>
+  `;
+  const footer = `
+    <button class="btn btn-ghost" data-action="close-modal">Close</button>
+    <button class="btn btn-primary" id="scan-qr-save" data-action="save-scanned-sender" data-id="${senderId}">${ICON.check} Save Sender</button>
+  `;
+  document.getElementById("modal-root").innerHTML = modalShell({
+    title: "Scan QR to Connect Sender",
+    bodyHtml: body,
+    footerHtml: footer,
+    narrow: true
+  });
+
+  const box = document.getElementById("scan-qr-box");
+  let tries = 0;
+  let unreachableStreak = 0;
+  const timer = setInterval(async () => {
+    // Stop if the modal was closed/replaced
+    if (!document.getElementById("scan-qr-box")) { clearInterval(timer); return; }
+    tries++;
+    try {
+      // Quick status check first (short timeout) — avoids buffering
+      const st = await api(`/senders/${senderId}/status`);
+      if (st.connected) {
+        box.innerHTML = `<div style="color: #10B981; font-weight: 600; font-size: 14px;">✅ Connected<br><span style="font-size:12px; color:var(--text-muted);">${escapeHtml(st.phone || st.name)}</span></div>`;
+        clearInterval(timer);
+        return;
+      }
+      unreachableStreak = 0;
+      const qr = await api(`/senders/${senderId}/qr-image`);
+      if (qr && qr.qr) {
+        box.innerHTML = `<img src="${qr.qr}" alt="WhatsApp QR" style="width: 240px; height: 240px; border-radius: 8px;" />`;
+      } else {
+        box.innerHTML = `<div style="color: var(--text-muted); font-size: 12.5px; padding: 12px;">Waiting for QR...</div>`;
+      }
+    } catch (err) {
+      // If WAHA is unreachable, don't spam — show once and slow down
+      unreachableStreak++;
+      box.innerHTML = `<div style="color: var(--red); font-size: 12px; padding: 12px;">${escapeHtml(err.message)}</div>`;
+      if (unreachableStreak >= 3) clearInterval(timer);
+    }
+    if (tries > 45) { box.innerHTML = `<div style="color: var(--text-muted); font-size: 12.5px;">Timed out. Close and try again.</div>`; clearInterval(timer); }
+  }, 2000);
 }
 
 /* ---------- Page: Calendar ---------- */
@@ -1227,7 +1435,20 @@ function renderDeleteContactsModal(count, contactIdsToDelete, groupId) {
 /* ---------- Modal: Create/Edit Template ---------- */
 
 function renderTemplateModal(isEdit = false) {
-  const { name, message, hasMedia, mediaUrl } = modalState;
+  const { name, message, hasMedia, mediaUrl, channel = "whatsapp", emailSubject = "" } = modalState;
+
+  const isEmail = channel === "email";
+
+  function processSpintaxPreview(text) {
+    if (!text) return '';
+    return text.replace(/\{([^{}]+)\}/g, (match, content) => {
+      const options = content.split('|');
+      return options[Math.floor(Math.random() * options.length)];
+    });
+  }
+  
+  const rawMessage = message || (isEmail ? 'Type your HTML message text to see preview...' : 'Your message preview will appear here...');
+  const parsedMessage = processSpintaxPreview(rawMessage);
 
   const body = `
     <div class="template-modal-grid" style="display: grid; grid-template-columns: 1.2fr 1fr; gap: 24px; align-items: start;">
@@ -1237,57 +1458,113 @@ function renderTemplateModal(isEdit = false) {
           <input id="m-name" class="text-input" type="text" value="${escapeHtml(name || '')}" data-field="name" placeholder="e.g. Exam Reminder" />
         </div>
         <div class="field">
-          <label class="field-label">Message <span class="req">*</span></label>
-          <textarea id="m-message" class="text-input" rows="5" data-field="message" placeholder="Type your message here...">${escapeHtml(message || '')}</textarea>
+          <label class="field-label">Channel <span class="req">*</span></label>
+          <select id="m-channel" class="text-input" data-field="channel">
+            <option value="whatsapp" ${channel === 'whatsapp' ? 'selected' : ''}>WhatsApp</option>
+            <option value="email" ${channel === 'email' ? 'selected' : ''}>Email</option>
+          </select>
         </div>
-        <div class="field">
-          <label class="checkbox-label">
-            <input type="checkbox" id="m-has-media" data-action="toggle-media" ${hasMedia ? 'checked' : ''} />
-            <span>Include media (image)</span>
-          </label>
-        </div>
-        ${hasMedia ? `
+        ${isEmail ? `
           <div class="field">
-            <label class="field-label">Media Image</label>
-            ${mediaUrl ? `
-              <div class="media-preview-container" style="position: relative; border: 1px solid var(--border); border-radius: 12px; overflow: hidden; max-width: 200px; margin-top: 8px;">
-                <img src="${mediaUrl}" style="width: 100%; height: auto; display: block;" />
-                <button type="button" data-action="remove-template-media" style="position: absolute; top: 8px; right: 8px; background: rgba(30,27,58,0.6); color: white; border: none; border-radius: 50%; width: 26px; height: 26px; display: flex; align-items: center; justify-content: center; cursor: pointer; transition: all 0.2s; padding: 0;">
-                  ${ICON.x}
-                </button>
-              </div>
-            ` : `
-              <input id="template-media-file" type="file" accept="image/*" hidden />
-              <div class="dropzone" id="template-media-dropzone" data-action="trigger-template-media-select" style="border: 2px dashed var(--violet-border); border-radius: 12px; padding: 24px 20px; text-align: center; cursor: pointer; transition: all 0.2s; background: var(--bg);">
-                <div class="dropzone-icon" style="color: var(--violet); margin-bottom: 8px;">
-                  ${ICON.image}
-                </div>
-                <div class="dropzone-title" style="font-size: 13.5px; font-weight: 600; color: var(--text);">
-                  Click to upload, or drag an image here
-                </div>
-                <div class="dropzone-sub" style="font-size: 11px; color: var(--text-muted); margin-top: 4px;">
-                  Supports PNG, JPG, JPEG, GIF
-                </div>
-              </div>
-            `}
+            <label class="field-label">Email Subject <span class="req">*</span></label>
+            <input id="m-email-subject" class="text-input" type="text" value="${escapeHtml(emailSubject || '')}" data-field="emailSubject" placeholder="e.g. Important Exam Update" />
           </div>
+        ` : ''}
+        <div class="field">
+          <label class="field-label">Message <span class="req">*</span></label>
+          ${isEmail ? `
+            <div style="border: 1px solid var(--border); border-radius: 8px; overflow: hidden; background: white; margin-bottom: 8px;">
+              <div id="editor-container" style="min-height: 150px; font-size: 14px;">${message || ''}</div>
+            </div>
+            
+            <div class="field" style="margin-top: 16px;">
+              <label class="field-label">Attachments</label>
+              <div id="attachment-list" style="display: flex; flex-direction: column; gap: 8px; margin-bottom: 8px;">
+                ${(modalState.attachments || []).map((att, i) => `
+                  <div style="display: flex; justify-content: space-between; align-items: center; padding: 8px 12px; background: #f9f9f9; border: 1px solid var(--border); border-radius: 6px; font-size: 13px;">
+                    <div style="display: flex; align-items: center; gap: 8px;">
+                      <span>📎</span>
+                      <span style="font-weight: 500; color: var(--text);">${escapeHtml(att.name)}</span>
+                    </div>
+                    <button type="button" class="remove-attachment-btn" data-action="remove-attachment" data-index="${i}" style="background: none; border: none; color: var(--danger); cursor: pointer; padding: 4px;">${ICON.x}</button>
+                  </div>
+                `).join('')}
+              </div>
+              <input id="template-attachment-file" type="file" multiple accept=".pdf,image/*" hidden data-action="upload-attachment" />
+              <button type="button" class="btn btn-secondary" onclick="document.getElementById('template-attachment-file').click()" style="width: 100%; display: flex; justify-content: center; align-items: center; gap: 6px; border: 1px dashed var(--border); background: #fafafa; color: var(--text-muted);">
+                📎 Add Attachment (PDF / Image)
+              </button>
+            </div>
+          ` : `
+            <textarea id="m-message" class="text-input" rows="5" data-field="message" placeholder="Type your message here...">${escapeHtml(message || '')}</textarea>
+          `}
+        </div>
+        ${!isEmail ? `
+          <div class="field">
+            <label class="checkbox-label">
+              <input type="checkbox" id="m-has-media" data-action="toggle-media" ${hasMedia ? 'checked' : ''} />
+              <span>Include media (image)</span>
+            </label>
+          </div>
+          ${hasMedia ? `
+            <div class="field">
+              <label class="field-label">Media Image</label>
+              ${mediaUrl ? `
+                <div class="media-preview-container" style="position: relative; border: 1px solid var(--border); border-radius: 12px; overflow: hidden; max-width: 200px; margin-top: 8px;">
+                  <img src="${mediaUrl}" style="width: 100%; height: auto; display: block;" />
+                  <button type="button" data-action="remove-template-media" style="position: absolute; top: 8px; right: 8px; background: rgba(30,27,58,0.6); color: white; border: none; border-radius: 50%; width: 26px; height: 26px; display: flex; align-items: center; justify-content: center; cursor: pointer; transition: all 0.2s; padding: 0;">
+                    ${ICON.x}
+                  </button>
+                </div>
+              ` : `
+                <input id="template-media-file" type="file" accept="image/*" hidden />
+                <div class="dropzone" id="template-media-dropzone" data-action="trigger-template-media-select" style="border: 2px dashed var(--violet-border); border-radius: 12px; padding: 24px 20px; text-align: center; cursor: pointer; transition: all 0.2s; background: var(--bg);">
+                  <div class="dropzone-icon" style="color: var(--violet); margin-bottom: 8px;">
+                    ${ICON.image}
+                  </div>
+                  <div class="dropzone-title" style="font-size: 13.5px; font-weight: 600; color: var(--text);">
+                    Click to upload, or drag an image here
+                  </div>
+                  <div class="dropzone-sub" style="font-size: 11px; color: var(--text-muted); margin-top: 4px;">
+                    Supports PNG, JPG, JPEG, GIF
+                  </div>
+                </div>
+              `}
+            </div>
+          ` : ''}
         ` : ''}
       </div>
 
-      <div class="template-preview-column" style="display: flex; flex-direction: column; align-items: center; background: #efeae2; border-radius: 12px; padding: 24px 20px; border: 1px solid var(--border); min-height: 300px; justify-content: center; position: relative;">
-        <div style="position: absolute; top: 12px; left: 16px; font-size: 11px; font-weight: 700; color: var(--text-muted); text-transform: uppercase; letter-spacing: 0.5px;">Live WhatsApp Preview</div>
-        <div class="whatsapp-bubble" style="background: white; border-radius: 8px; box-shadow: 0 1px 1px rgba(30,27,58,0.12); padding: 8px 8px 4px; width: 100%; max-width: 250px; font-size: 13px; color: #303030; position: relative; margin-top: 12px; align-self: flex-start;">
-          ${hasMedia && mediaUrl ? `
-            <div style="border-radius: 6px; overflow: hidden; margin-bottom: 6px;">
-              <img src="${mediaUrl}" style="width: 100%; height: auto; display: block;" />
+      <div class="template-preview-column" style="width: 100%;">
+        ${isEmail ? `
+          <div style="display: flex; flex-direction: column; background: #ffffff; border-radius: 12px; padding: 20px; border: 1px solid var(--border); min-height: 250px; justify-content: flex-start; position: relative;">
+            <div style="font-size: 11px; font-weight: 700; color: var(--text-muted); text-transform: uppercase; letter-spacing: 0.5px; margin-bottom: 12px;">Live Email Preview</div>
+            <div style="width: 100%; border: 1px solid var(--border-soft); border-radius: 8px; overflow: hidden; font-size: 13px; text-align: left;">
+              <div style="background: #F3F4F6; padding: 10px 14px; border-bottom: 1px solid var(--border-soft); color: var(--text-muted); line-height: 1.4;">
+                <div><strong>Subject:</strong> <span id="email-preview-subject" style="color: var(--text);">${escapeHtml(emailSubject || '(No Subject)')}</span></div>
+                <div style="margin-top: 4px;"><strong>From:</strong> flyblast@yourdomain.com</div>
+                <div style="margin-top: 4px;"><strong>To:</strong> recipient@email.com</div>
+              </div>
+              <div id="email-preview-body" style="padding: 14px; min-height: 120px; background: white; color: var(--text); white-space: pre-wrap; line-height: 1.5; word-break: break-word; font-family: inherit;">${parsedMessage}</div>
             </div>
-          ` : ''}
-          <div id="whatsapp-preview-text" style="white-space: pre-wrap; line-height: 1.4; word-break: break-word; font-family: inherit;">${escapeHtml(message || 'Your message preview will appear here...')}</div>
-          <div style="display: flex; justify-content: flex-end; align-items: center; gap: 2px; font-size: 10px; color: #909090; margin-top: 4px;">
-            <span>10:00 AM</span>
-            <svg viewBox="0 0 24 24" width="12" height="12" fill="none" stroke="#25D366" stroke-width="2.5"><path d="m3 12 5 5L20 4"/><path d="m11 17 2.5 2.5L20 11" stroke-linecap="round"/></svg>
           </div>
-        </div>
+        ` : `
+          <div style="display: flex; flex-direction: column; align-items: center; background: #efeae2; border-radius: 12px; padding: 24px 20px; border: 1px solid var(--border); min-height: 300px; justify-content: center; position: relative;">
+            <div style="position: absolute; top: 12px; left: 16px; font-size: 11px; font-weight: 700; color: var(--text-muted); text-transform: uppercase; letter-spacing: 0.5px;">Live WhatsApp Preview</div>
+            <div class="whatsapp-bubble" style="background: white; border-radius: 8px; box-shadow: 0 1px 1px rgba(30,27,58,0.12); padding: 8px 8px 4px; width: 100%; max-width: 250px; font-size: 13px; color: #303030; position: relative; margin-top: 12px; align-self: flex-start;">
+              ${hasMedia && mediaUrl ? `
+                <div style="border-radius: 6px; overflow: hidden; margin-bottom: 6px;">
+                  <img src="${mediaUrl}" style="width: 100%; height: auto; display: block;" />
+                </div>
+              ` : ''}
+              <div id="whatsapp-preview-text" style="white-space: pre-wrap; line-height: 1.4; word-break: break-word; font-family: inherit;">${escapeHtml(parsedMessage)}</div>
+              <div style="display: flex; justify-content: flex-end; align-items: center; gap: 2px; font-size: 10px; color: #909090; margin-top: 4px;">
+                <span>10:00 AM</span>
+                <svg viewBox="0 0 24 24" width="12" height="12" fill="none" stroke="#25D366" stroke-width="2.5"><path d="m3 12 5 5L20 4"/><path d="m11 17 2.5 2.5L20 11" stroke-linecap="round"/></svg>
+              </div>
+            </div>
+          </div>
+        `}
       </div>
     </div>
   `;
@@ -1303,19 +1580,66 @@ function renderTemplateModal(isEdit = false) {
     footerHtml: footer,
     wide: true
   });
+
+  if (isEmail && window.Quill) {
+    const quill = new Quill('#editor-container', {
+      theme: 'snow',
+      placeholder: 'Type your email message here...',
+      modules: {
+        toolbar: [
+          [{ 'header': [1, 2, 3, false] }],
+          ['bold', 'italic', 'underline', 'strike'],
+          [{ 'list': 'ordered'}, { 'list': 'bullet' }],
+          ['link', 'image'],
+          ['clean']
+        ]
+      }
+    });
+    
+    quill.on('text-change', function() {
+      const html = quill.root.innerHTML;
+      modalState.message = html;
+      
+      const processSpintax = (text) => text.replace(/\{([^{}]+)\}/g, (match, content) => {
+        const options = content.split('|');
+        return options[Math.floor(Math.random() * options.length)];
+      });
+      const parsedVal = processSpintax(html);
+      
+      const emailBodyEl = document.getElementById("email-preview-body");
+      if (emailBodyEl) {
+        emailBodyEl.innerHTML = parsedVal;
+      }
+    });
+
+    quill.root.addEventListener('click', (ev) => {
+      if (ev.target.tagName === 'IMG') {
+        showConfirmModal(
+          "Remove Image", 
+          "Would you like to delete this image from your message?", 
+          () => {
+            const blot = Quill.find(ev.target);
+            if (blot) {
+              blot.deleteAt(0, 1);
+            } else {
+              ev.target.remove();
+              // Force text-change emit so state and preview update
+              quill.emitter.emit('text-change');
+            }
+          }
+        );
+      }
+    });
+  }
 }
 
 /* ---------- Modal: Create Campaign ---------- */
 
 function renderCampaignModal() {
-  const { name, groupId, templateId } = modalState;
-
-  const groupOptions = groups.map(g =>
-    `<option value="${g.id}" ${groupId === g.id ? 'selected' : ''}>${escapeHtml(g.name)}</option>`
-  ).join('');
+  const { name, groupIds = [], templateId } = modalState;
 
   const templateOptions = templates.map(t =>
-    `<option value="${t.id}" ${templateId === t.id ? 'selected' : ''}>${escapeHtml(t.name)}</option>`
+    `<option value="${t.id}" ${templateId === t.id ? 'selected' : ''}>${escapeHtml(t.name)} (${t.channel === 'email' ? 'Email' : 'WhatsApp'})</option>`
   ).join('');
 
   const body = `
@@ -1324,11 +1648,95 @@ function renderCampaignModal() {
       <input id="m-name" class="text-input" type="text" value="${escapeHtml(name || '')}" data-field="name" placeholder="e.g. March SPM Blast" />
     </div>
     <div class="field">
-      <label class="field-label">Select Group <span class="req">*</span></label>
-      <select id="m-group" class="text-input" data-field="groupId">
-        <option value="">Choose a group...</option>
-        ${groupOptions}
-      </select>
+      <label class="field-label">Target Type <span class="req">*</span></label>
+      <div style="display: flex; gap: 16px; margin-top: 6px; margin-bottom: 12px;">
+        <label style="display: flex; align-items: center; gap: 6px; cursor: pointer; font-size: 13.5px; font-weight: 500;">
+          <input type="radio" name="m-targetType" value="individual" checked />
+          Individual Blast (DMs)
+        </label>
+        <label style="display: flex; align-items: center; gap: 6px; cursor: pointer; font-size: 13.5px; font-weight: 500;">
+          <input type="radio" name="m-targetType" value="group" />
+          WhatsApp Group Chat
+        </label>
+      </div>
+    </div>
+    <div class="field">
+      <label class="field-label">Delay Response <span class="req">*</span></label>
+      <div style="display: grid; grid-template-columns: repeat(3, 1fr); gap: 12px; margin-top: 6px; margin-bottom: 12px;">
+        <style>
+          .delay-label { cursor: pointer; display: block; }
+          .delay-radio { display: none; }
+          .delay-card { border: 1px solid var(--border); border-radius: 8px; padding: 16px; text-align: center; background: white; transition: all 0.2s; height: 100%; }
+          .delay-radio:checked + .delay-card { border: 2px solid var(--violet); background: rgba(108, 92, 231, 0.05); box-shadow: 0 2px 8px rgba(108, 92, 231, 0.1); }
+          .delay-icon { font-size: 20px; color: var(--violet); margin-bottom: 8px; }
+          .delay-title { font-weight: 600; font-size: 14px; color: var(--text); }
+          .delay-sub { font-size: 12px; color: var(--text-muted); margin-top: 4px; }
+        </style>
+        <label class="delay-label">
+          <input type="radio" name="m-delay" value="5" class="delay-radio" />
+          <div class="delay-card">
+            <div class="delay-icon">⚡</div>
+            <div class="delay-title">Fast</div>
+            <div class="delay-sub">5s delay</div>
+          </div>
+        </label>
+        <label class="delay-label">
+          <input type="radio" name="m-delay" value="15" class="delay-radio" checked />
+          <div class="delay-card">
+            <div class="delay-icon">⏱️</div>
+            <div class="delay-title">Normal</div>
+            <div class="delay-sub">15s delay</div>
+          </div>
+        </label>
+        <label class="delay-label">
+          <input type="radio" name="m-delay" value="30" class="delay-radio" />
+          <div class="delay-card">
+            <div class="delay-icon">🐢</div>
+            <div class="delay-title">Safe</div>
+            <div class="delay-sub">30s delay</div>
+          </div>
+        </label>
+      </div>
+    </div>
+    <div class="field">
+      <label class="field-label">Select Target Groups <span class="req">*</span></label>
+      <div class="multi-select-container" style="position: relative; font-family: inherit;">
+        
+        <!-- Multi-select trigger box -->
+        <div id="group-select-trigger" class="text-input" style="min-height: 38px; height: auto; display: flex; flex-wrap: wrap; align-items: center; gap: 6px; padding: 6px 12px; cursor: pointer; border: 1px solid var(--border); border-radius: 8px; background: var(--bg); position: relative; padding-right: 32px; box-sizing: border-box;">
+          ${groupIds.length === 0 ? `
+            <span style="color: var(--text-muted); font-size: 13.5px;">Choose target groups...</span>
+          ` : groupIds.map(gId => {
+              const g = groups.find(x => x.id === gId);
+              if (!g) return '';
+              return `
+                <span class="group-select-chip" style="background: var(--violet-light); color: var(--violet); padding: 2px 8px; border-radius: 6px; font-size: 12.0px; font-weight: 600; display: inline-flex; align-items: center; gap: 4px; z-index: 2;">
+                  ${escapeHtml(g.name)}
+                  <button type="button" class="chip-remove-btn" data-action="deselect-group-chip" data-id="${g.id}" style="background: none; border: none; padding: 0; color: var(--violet); cursor: pointer; font-size: 11px; display: flex; align-items: center; justify-content: center; width: 14px; height: 14px;">${ICON.x}</button>
+                </span>
+              `;
+            }).join('')}
+          <div style="position: absolute; right: 12px; top: 50%; transform: translateY(-50%); pointer-events: none; color: var(--text-muted);">
+            <svg viewBox="0 0 24 24" width="15" height="15" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="m6 9 6 6 6-6"/></svg>
+          </div>
+        </div>
+
+        <!-- Dropdown menu popup -->
+        <div id="group-select-dropdown" style="display: none; position: absolute; top: 100%; left: 0; right: 0; background: var(--card); border: 1px solid var(--border); border-radius: 8px; box-shadow: 0 10px 25px rgba(30,27,58,0.15); margin-top: 4px; z-index: 1000; max-height: 200px; overflow-y: auto;">
+          ${groups.length === 0 ? `
+            <div style="padding: 10px 14px; font-size: 13px; color: var(--text-faint);">No groups found. Please create a group first.</div>
+          ` : groups.map(g => {
+              const isSelected = groupIds.includes(g.id);
+              return `
+                <div class="group-dropdown-item" data-action="toggle-group-selection" data-id="${g.id}" style="padding: 10px 14px; font-size: 13.5px; cursor: pointer; display: flex; align-items: center; justify-content: space-between; transition: background 0.15s; background: ${isSelected ? 'var(--bg-light)' : 'transparent'};">
+                  <span style="color: var(--text);">${escapeHtml(g.name)} (${g.contacts.length} contacts)</span>
+                  ${isSelected ? `<span style="color: var(--violet); display: flex; align-items: center;">${ICON.check}</span>` : ''}
+                </div>
+              `;
+            }).join('')}
+        </div>
+
+      </div>
     </div>
     <div class="field">
       <label class="field-label">Select Template <span class="req">*</span></label>
@@ -1336,6 +1744,15 @@ function renderCampaignModal() {
         <option value="">Choose a template...</option>
         ${templateOptions}
       </select>
+    </div>
+    <div class="field" style="margin-top: 4px;">
+      <label class="checkbox-label" style="display: flex; align-items: center; gap: 10px; cursor: pointer; user-select: none;">
+        <input type="checkbox" id="m-only-interactions" ${modalState.onlyInteractions ? 'checked' : ''} style="width: 18px; height: 18px; cursor: pointer;" />
+        <span style="font-weight: 600; font-size: 13.5px; color: var(--text);">Only contacts with prior interaction</span>
+      </label>
+      <p style="font-size: 11.5px; color: var(--text-muted); margin: 4px 0 0; line-height: 1.4;">
+        Only blast to numbers you've received from or replied to before (individual & group chats).
+      </p>
     </div>
     <div class="hint-note">
       ${ICON.alert} Campaign will be created in "Pending" status. You can start it from the campaigns page.
@@ -1354,11 +1771,59 @@ function renderCampaignModal() {
   });
 }
 
+/* ---------- Modal: Import WhatsApp Group ---------- */
+
+function renderImportGroupModal() {
+  modal = { type: "import-group" };
+  const body = `
+    <div style="display: flex; flex-direction: column; gap: 14px;">
+      <p style="font-size: 13px; color: var(--text-muted); margin: 0; line-height: 1.5;">
+        Pull a WhatsApp group's members directly from your connected sender session. This creates a new group with all its members.
+      </p>
+      <div class="field">
+        <label class="field-label">WhatsApp Group</label>
+        <select id="import-group-select" class="text-input">
+          <option value="">Loading groups...</option>
+        </select>
+      </div>
+      <div id="import-group-info" style="font-size: 12.5px; color: var(--text-muted);"></div>
+    </div>
+  `;
+  const footer = `
+    <button class="btn btn-ghost" data-action="close-modal">Cancel</button>
+    <button class="btn btn-primary" id="import-group-confirm" data-action="import-group-confirmed">${ICON.download} Import Group</button>
+  `;
+  document.getElementById("modal-root").innerHTML = modalShell({
+    title: "Import WhatsApp Group",
+    bodyHtml: body,
+    footerHtml: footer,
+    narrow: true
+  });
+
+  const sel = document.getElementById("import-group-select");
+  const info = document.getElementById("import-group-info");
+  api("/waha/groups").then(list => {
+    if (sel) {
+      if (list.length === 0) {
+        sel.innerHTML = `<option value="">No groups found on this session</option>`;
+        if (info) info.textContent = "Make sure the sender session is connected and has groups.";
+      } else {
+        sel.innerHTML = `<option value="">Choose a group...</option>` + list.map(g =>
+          `<option value="${escapeHtml(g.id)}">${escapeHtml(g.name)} (${g.participants} members)</option>`
+        ).join('');
+      }
+    }
+  }).catch(err => {
+    if (sel) sel.innerHTML = `<option value="">Could not load groups</option>`;
+    if (info) info.textContent = err.message;
+  });
+}
+
 function renderAddContactModal() {
   const group = groups.find(g => g.id === modal.groupId);
   if (!group) return;
 
-  const { tab = "manual", contacts = [], parsed = [], fileName = null, count = null, error = null } = modalState;
+  const { tab = "manual", contacts = [], parsed = [], fileName = null, count = null, error = null, contactType = "individual" } = modalState;
 
   const tabsHtml = `
     <div class="modal-tabs" style="display: flex; border-bottom: 1px solid var(--border); margin: -10px -20px 20px; padding: 0 20px;">
@@ -1373,12 +1838,26 @@ function renderAddContactModal() {
 
   let bodyHtml = "";
   if (tab === "manual") {
+    const isGroup = contactType === 'group';
     bodyHtml = `
       <div class="field">
-        <label class="field-label">Add Contact</label>
+        <label class="field-label">Contact Type</label>
+        <div style="display: flex; gap: 16px; margin-bottom: 12px; margin-top: 4px;">
+          <label style="display: flex; align-items: center; gap: 6px; cursor: pointer; font-size: 13.5px; font-weight: 500;">
+            <input type="radio" name="m-addType" value="individual" ${!isGroup ? 'checked' : ''} />
+            Individual Person
+          </label>
+          <label style="display: flex; align-items: center; gap: 6px; cursor: pointer; font-size: 13.5px; font-weight: 500;">
+            <input type="radio" name="m-addType" value="group" ${isGroup ? 'checked' : ''} />
+            WhatsApp Group Chat
+          </label>
+        </div>
+
+        <label class="field-label">Add ${isGroup ? 'Group Chat' : 'Contact'}</label>
         <div class="input-row" style="display: flex; gap: 8px; margin-bottom: 6px;">
-          <input id="m-contact-name" class="text-input" type="text" placeholder="Name" data-field="contactName" style="flex:1; height: 38px; border: 1px solid var(--border); border-radius: 8px; padding: 6px 12px;" />
-          <input id="m-contact-phone" class="text-input" type="text" placeholder="+60123456789" data-field="contactPhone" style="flex:1; height: 38px; border: 1px solid var(--border); border-radius: 8px; padding: 6px 12px;" />
+          <input id="m-contact-name" class="text-input" type="text" placeholder="${isGroup ? 'WhatsApp Group Name' : 'Name'}" data-field="contactName" style="flex:1; height: 38px; border: 1px solid var(--border); border-radius: 8px; padding: 6px 12px;" value="${escapeHtml(modalState.contactName || '')}" />
+          <input id="m-contact-phone" class="text-input" type="text" placeholder="${isGroup ? 'Group ID (e.g. 120363027...)' : 'Phone Number'}" data-field="contactPhone" style="flex:1; height: 38px; border: 1px solid var(--border); border-radius: 8px; padding: 6px 12px;" value="${escapeHtml(modalState.contactPhone || '')}" />
+          ${!isGroup ? `<input id="m-contact-email" class="text-input" type="text" placeholder="Email (optional)" data-field="contactEmail" style="flex:1.2; height: 38px; border: 1px solid var(--border); border-radius: 8px; padding: 6px 12px;" value="${escapeHtml(modalState.contactEmail || '')}" />` : ''}
           <button class="btn-chip" data-action="add-contact-to-temp-list" style="height: 38px; border-radius: 8px; border: 1px solid var(--violet-border); background: var(--violet-light); color: var(--violet); padding: 0 16px; font-weight: 600; cursor: pointer; display: flex; align-items: center; gap: 4px;">${ICON.plus} Add</button>
         </div>
         <div id="m-phone-validation-message" style="font-size: 12.5px; margin-top: 4px; display: none;"></div>
@@ -1389,7 +1868,7 @@ function renderAddContactModal() {
           <div class="contacts-mini-list" style="max-height: 150px; overflow-y: auto; border: 1px solid var(--border); border-radius: 8px; padding: 8px; background: var(--bg); display: flex; flex-direction: column; gap: 6px;">
             ${contacts.map((c, i) => `
               <div class="contact-mini-item" style="display: flex; justify-content: space-between; align-items: center; background: var(--card); padding: 6px 10px; border-radius: 6px; border: 1px solid var(--border-soft); font-size: 13px;">
-                <span>${escapeHtml(c.name || '')} (${escapeHtml(c.phone)})</span>
+                <span>${escapeHtml(c.name || '')} (${escapeHtml(c.phone)}) ${c.email ? `<code style="background:var(--bg); padding:2px 4px; border-radius:4px; font-size:11px;">${escapeHtml(c.email)}</code>` : ''}</span>
                 <button class="icon-btn-mini red" data-action="remove-temp-contact" data-index="${i}" style="background: none; border: none; color: var(--red); cursor: pointer; display: flex; align-items: center; justify-content: center; padding: 2px;">${ICON.x}</button>
               </div>
             `).join('')}
@@ -1489,12 +1968,52 @@ function closeModal() {
   document.getElementById("modal-root").innerHTML = "";
 }
 
+function closeConfirmModal() {
+  document.getElementById("confirm-modal-root").innerHTML = "";
+}
+
+let pendingConfirmAction = null;
+
+function showConfirmModal(title, message, onConfirm) {
+  pendingConfirmAction = onConfirm;
+  const footerHtml = `
+    <button class="btn btn-ghost" data-action="close-confirm-modal">Cancel</button>
+    <button class="btn btn-primary" data-action="confirm-modal-ok">${ICON.check} Remove</button>
+  `;
+  const html = modalShell({
+    title: title,
+    bodyHtml: `<p style="margin: 0; font-size: 14px; color: var(--text);">${message}</p>`,
+    footerHtml: footerHtml,
+    narrow: true
+  });
+  // Change z-index slightly so it stacks above
+  document.getElementById("confirm-modal-root").innerHTML = html.replace('class="overlay"', 'class="overlay" style="z-index: 2000;"');
+}
+
 /* ---------- Event delegation ---------- */
 
 document.addEventListener("click", (e) => {
+  // Close group select dropdown if clicking outside
+  const selectDropdown = document.getElementById("group-select-dropdown");
+  const selectTrigger = document.getElementById("group-select-trigger");
+  if (selectDropdown && selectTrigger) {
+    if (selectTrigger.contains(e.target)) {
+      selectDropdown.style.display = selectDropdown.style.display === "block" ? "none" : "block";
+    } else if (!selectDropdown.contains(e.target)) {
+      selectDropdown.style.display = "none";
+    }
+  }
+
   const overlay = e.target.closest(".overlay");
   const stopEl = e.target.closest("[data-stop]");
-  if (overlay && !stopEl) { closeModal(); return; }
+  if (overlay && !stopEl) {
+    if (overlay.parentElement && overlay.parentElement.id === "confirm-modal-root") {
+      closeConfirmModal();
+    } else {
+      closeModal();
+    }
+    return;
+  }
 
   const actionEl = e.target.closest("[data-action]");
   if (!actionEl) return;
@@ -1513,11 +2032,27 @@ document.addEventListener("click", (e) => {
       activeGroupId = null;
       activeCampaignId = null;
       isEditingGroup = false;
+
+      // Auto-close sidebar on mobile
+      document.querySelector(".sidebar")?.classList.remove("open");
+      document.getElementById("sidebar-overlay")?.classList.remove("visible");
+
       renderPage();
       break;
     }
     case "close-modal": {
       closeModal();
+      break;
+    }
+    case "close-confirm-modal": {
+      closeConfirmModal();
+      pendingConfirmAction = null;
+      break;
+    }
+    case "confirm-modal-ok": {
+      if (pendingConfirmAction) pendingConfirmAction();
+      pendingConfirmAction = null;
+      closeConfirmModal();
       break;
     }
 
@@ -1541,6 +2076,126 @@ document.addEventListener("click", (e) => {
       modal = { type: "create-group" };
       isEditingGroup = false;
       renderGroupModal();
+      break;
+    }
+    case "import-whatsapp-group": {
+      modalState = {};
+      modal = { type: "import-group" };
+      renderImportGroupModal();
+      break;
+    }
+    case "import-group-confirmed": {
+      const sel = document.getElementById("import-group-select");
+      const wahaGroupId = sel ? sel.value : "";
+      const info = document.getElementById("import-group-info");
+      if (!wahaGroupId) {
+        if (info) info.textContent = "Please choose a group to import.";
+        return;
+      }
+      if (info) info.textContent = "Importing members...";
+      (async () => {
+        try {
+          const result = await api("/waha/groups/import", {
+            method: "POST",
+            body: JSON.stringify({ wahaGroupId })
+          });
+          alert(`Imported "${result.groupName}" — ${result.added} added, ${result.skipped} already present.`);
+          await syncFromBackend();
+          closeModal();
+          renderPage();
+        } catch (err) {
+          if (info) info.textContent = err.message;
+        }
+      })();
+      break;
+    }
+    case "scan-interactions": {
+      (async () => {
+        try {
+          const result = await api("/waha/interactions/scan", { method: "POST" });
+          alert(result.message || "Scan complete.");
+          await syncFromBackend();
+          renderPage();
+        } catch (err) {
+          alert("Scan failed: " + err.message);
+        }
+      })();
+      break;
+    }
+    // Senders (settings)
+    case "add-sender-confirmed": {
+      const nameInput = document.getElementById("add-sender-name");
+      const resultEl = document.getElementById("add-sender-result");
+      const name = nameInput ? nameInput.value.trim() : "";
+      if (!name) {
+        if (resultEl) resultEl.textContent = "Please enter a sender name.";
+        return;
+      }
+      (async () => {
+        try {
+          const created = await api("/senders", { method: "POST", body: JSON.stringify({ name }) });
+          closeModal();
+          // Open the scan modal for the newly created sender
+          renderScanSenderQrModal(created.id, created.name);
+        } catch (err) {
+          if (resultEl) resultEl.textContent = err.message;
+        }
+      })();
+      break;
+    }
+    case "scan-sender": {
+      const id = actionEl.dataset.id;
+      (async () => {
+        try {
+          const senders = await api("/senders");
+          const sender = senders.find(s => s.id === Number(id));
+          renderScanSenderQrModal(id, sender ? sender.name : "Sender");
+        } catch (err) {
+          alert("Failed to load sender: " + err.message);
+        }
+      })();
+      break;
+    }
+    case "save-scanned-sender": {
+      const id = actionEl.dataset.id;
+      (async () => {
+        try {
+          // Mark as default (keeps it saved & makes it the active sender)
+          await api("/senders/" + id, { method: "PATCH", body: JSON.stringify({ isDefault: true }) });
+          closeModal();
+          alert("Sender saved as default.");
+          renderSettingsPage();
+        } catch (err) {
+          alert("Failed to save sender: " + err.message);
+        }
+      })();
+      break;
+    }
+    case "save-sender": {
+      const id = actionEl.dataset.id;
+      (async () => {
+        try {
+          await api("/senders/" + id, { method: "PATCH", body: JSON.stringify({ isDefault: true }) });
+          alert("Sender set as default.");
+          renderSettingsPage();
+        } catch (err) {
+          alert("Failed to save sender: " + err.message);
+        }
+      })();
+      break;
+    }
+    case "delete-sender": {
+      const id = actionEl.dataset.id;
+      if (confirm("Delete this sender? This disconnects the WhatsApp session too.")) {
+        (async () => {
+          try {
+            await api("/senders/" + id, { method: "DELETE" });
+            renderSettingsPage();
+          } catch (err) {
+            alert("Failed to delete sender: " + err.message);
+          }
+        })();
+      }
       break;
     }
     case "edit-group": {
@@ -1569,8 +2224,8 @@ document.addEventListener("click", (e) => {
       }
       (async () => {
         const groupId = actionEl.dataset.id;
-        await supabaseClient.from('groups').update({ name: newName }).eq('id', groupId);
-        await syncFromSupabase();
+        await api("/groups/" + groupId, { method: "PATCH", body: JSON.stringify({ name: newName }) });
+        await syncFromBackend();
         isEditingGroup = false;
         selectedContacts.clear();
         renderPage();
@@ -1599,6 +2254,7 @@ document.addEventListener("click", (e) => {
       const group = groups.find(g => g.id === groupId);
       const nameVal = document.getElementById("inline-contact-name").value.trim();
       const phoneVal = document.getElementById("inline-contact-phone").value.trim();
+      const emailVal = document.getElementById("inline-contact-email").value.trim();
       if (!phoneVal) {
         alert("Phone number is required");
         return;
@@ -1606,16 +2262,14 @@ document.addEventListener("click", (e) => {
       (async () => {
         if (group && group.contacts[idx]) {
           const contactId = group.contacts[idx].id;
-          const { error } = await supabaseClient
-            .from('contacts')
-            .update({ name: nameVal, phone: phoneVal })
-            .eq('id', contactId);
-          if (error) {
-            alert("Database Error updating contact: " + error.message);
-            console.error(error);
+          try {
+            await api("/contacts/" + contactId, { method: "PATCH", body: JSON.stringify({ name: nameVal, phone: phoneVal, email: emailVal }) });
+          } catch (err) {
+            alert("Database Error updating contact: " + err.message);
+            console.error(err);
           }
         }
-        await syncFromSupabase();
+        await syncFromBackend();
         editingContactIndex = null;
         renderPage();
       })();
@@ -1659,16 +2313,15 @@ document.addEventListener("click", (e) => {
       const contactIds = modal.contactIds;
       if (groupId && contactIds && contactIds.length > 0) {
         (async () => {
-          const { error } = await supabaseClient
-            .from('group_contacts')
-            .delete()
-            .eq('group_id', groupId)
-            .in('contact_id', contactIds);
-          if (error) {
-            alert("Database Error deleting contacts: " + error.message);
-            console.error(error);
+          try {
+            for (const cid of contactIds) {
+              await api("/groups/" + groupId + "/contacts/" + cid, { method: "DELETE" });
+            }
+          } catch (err) {
+            alert("Database Error deleting contacts: " + err.message);
+            console.error(err);
           }
-          await syncFromSupabase();
+          await syncFromBackend();
           selectedContacts.clear();
           closeModal();
           renderPage();
@@ -1684,8 +2337,10 @@ document.addEventListener("click", (e) => {
     case "add-contact-to-temp-list": {
       const nameInput = document.getElementById("m-contact-name");
       const phoneInput = document.getElementById("m-contact-phone");
+      const emailInput = document.getElementById("m-contact-email");
       const name = nameInput.value.trim();
       const rawPhone = phoneInput.value.trim();
+      const email = emailInput ? emailInput.value.trim() : "";
       if (!rawPhone) {
         alert("Phone number is required");
         return;
@@ -1706,9 +2361,10 @@ document.addEventListener("click", (e) => {
       }
 
       if (!modalState.contacts) modalState.contacts = [];
-      modalState.contacts.push({ name: name || 'No Name', phone: cleanedPhone });
+      modalState.contacts.push({ name: name || 'No Name', phone: cleanedPhone, email: email });
       modalState.contactName = "";
       modalState.contactPhone = "";
+      modalState.contactEmail = "";
       renderAddContactModal();
       break;
     }
@@ -1742,28 +2398,22 @@ document.addEventListener("click", (e) => {
               seenInList.add(cleanedPhone);
               uniqueNewContacts.push({
                 name: c.name ? String(c.name).trim() : 'No Name',
-                phone: cleanedPhone
+                phone: cleanedPhone,
+                email: c.email ? String(c.email).trim() : ''
               });
             }
           }
 
-          // Write new contacts to DB and map them to the group
-          for (const contact of uniqueNewContacts) {
-            const { data: cInserted, error: cError } = await supabaseClient
-              .from('contacts')
-              .upsert({ name: contact.name, phone: contact.phone }, { onConflict: 'phone' })
-              .select();
-
-            if (!cError && cInserted && cInserted.length > 0) {
-              await supabaseClient
-                .from('group_contacts')
-                .insert({ group_id: g.id, contact_id: cInserted[0].id });
-            } else if (cError) {
-              console.error("Database Error inserting contact: ", cError);
+          // Write new contacts to DB and map them to the group (bulk upsert via backend)
+          if (uniqueNewContacts.length > 0) {
+            try {
+              await api("/groups/" + g.id + "/contacts", { method: "POST", body: JSON.stringify({ contacts: uniqueNewContacts }) });
+            } catch (err) {
+              console.error("Database Error inserting contacts: ", err);
             }
           }
         }
-        await syncFromSupabase();
+        await syncFromBackend();
         closeModal();
         renderPage();
       })();
@@ -1776,16 +2426,13 @@ document.addEventListener("click", (e) => {
       if (group && confirm(`Remove ${group.contacts[idx].name} from this group?`)) {
         (async () => {
           const contactId = group.contacts[idx].id;
-          const { error } = await supabaseClient
-            .from('group_contacts')
-            .delete()
-            .eq('group_id', groupId)
-            .eq('contact_id', contactId);
-          if (error) {
-            alert("Database Error removing contact: " + error.message);
-            console.error(error);
+          try {
+            await api("/groups/" + groupId + "/contacts/" + contactId, { method: "DELETE" });
+          } catch (err) {
+            alert("Database Error removing contact: " + err.message);
+            console.error(err);
           }
-          await syncFromSupabase();
+          await syncFromBackend();
           renderPage();
         })();
       }
@@ -1823,26 +2470,18 @@ document.addEventListener("click", (e) => {
       if (!modalState.name.trim()) return;
 
       (async () => {
-        if (modal.type === 'edit-group') {
-          const groupId = modalState.id;
-          const { error: gError } = await supabaseClient
-            .from('groups')
-            .update({ name: modalState.name.trim() })
-            .eq('id', groupId);
-          if (gError) {
-            alert("Error updating group name: " + gError.message);
-            return;
+        try {
+          if (modal.type === 'edit-group') {
+            const groupId = modalState.id;
+            await api("/groups/" + groupId, { method: "PATCH", body: JSON.stringify({ name: modalState.name.trim() }) });
+          } else {
+            await api("/groups", { method: "POST", body: JSON.stringify({ name: modalState.name.trim() }) });
           }
-        } else {
-          const { error: gError } = await supabaseClient
-            .from('groups')
-            .insert({ name: modalState.name.trim() });
-          if (gError) {
-            alert("Error creating group: " + gError.message);
-            return;
-          }
+        } catch (err) {
+          alert("Error saving group: " + err.message);
+          return;
         }
-        await syncFromSupabase();
+        await syncFromBackend();
         closeModal();
         isEditingGroup = false;
         renderPage();
@@ -1861,12 +2500,13 @@ document.addEventListener("click", (e) => {
     case "delete-group-confirmed": {
       const groupId = actionEl.dataset.id;
       (async () => {
-        const { error } = await supabaseClient.from('groups').delete().eq('id', groupId);
-        if (error) {
-          alert("Database Error: " + error.message);
-          console.error(error);
+        try {
+          await api("/groups/" + groupId, { method: "DELETE" });
+        } catch (err) {
+          alert("Database Error: " + err.message);
+          console.error(err);
         }
-        await syncFromSupabase();
+        await syncFromBackend();
         closeModal();
         renderPage();
       })();
@@ -1875,7 +2515,7 @@ document.addEventListener("click", (e) => {
 
     // Templates
     case "create-template": {
-      modalState = { name: "", message: "", hasMedia: false, mediaUrl: "" };
+      modalState = { name: "", message: "", channel: "whatsapp", emailSubject: "", hasMedia: false, mediaUrl: "" };
       modal = { type: "create-template" };
       renderTemplateModal();
       break;
@@ -1901,37 +2541,48 @@ document.addEventListener("click", (e) => {
       renderTemplateModal(modal.type === 'edit-template');
       break;
     }
+    case "remove-attachment": {
+      const idx = actionEl.dataset.index;
+      if (modalState.attachments && idx !== undefined) {
+        modalState.attachments.splice(parseInt(idx, 10), 1);
+        renderTemplateModal(modal.type === 'edit-template');
+      }
+      break;
+    }
     case "save-template": {
+      const channel = modalState.channel || "whatsapp";
       if (!modalState.name.trim() || !modalState.message.trim()) return;
+      if (channel === "email" && !modalState.emailSubject.trim()) {
+        alert("Email Subject is required for email templates.");
+        return;
+      }
 
       (async () => {
-        if (modal.type === 'edit-template') {
-          const templateId = modalState.id;
-          await supabaseClient
-            .from('templates')
-            .update({
-              name: modalState.name.trim(),
-              message_text: modalState.message.trim(),
-              media_url: modalState.hasMedia ? modalState.mediaUrl : null,
-              media_type: modalState.hasMedia ? 'image' : null
-            })
-            .eq('id', templateId);
-        } else {
-          const { data: tInserted, error: tError } = await supabaseClient
-            .from('templates')
-            .insert({
-              name: modalState.name.trim(),
-              message_text: modalState.message.trim(),
-              media_url: modalState.hasMedia ? modalState.mediaUrl : null,
-              media_type: modalState.hasMedia ? 'image' : null
-            })
-            .select();
-          if (tError) {
-            alert("Error creating template: " + tError.message);
-            return;
+        const isEmail = channel === "email";
+        const hasMedia = !isEmail && modalState.hasMedia;
+
+        const payload = {
+          name: modalState.name.trim(),
+          message_text: modalState.message.trim(),
+          channel: channel,
+          email_subject: isEmail ? modalState.emailSubject.trim() : null,
+          media_url: hasMedia ? modalState.mediaUrl : null,
+          media_type: hasMedia ? 'image' : null,
+          attachments: isEmail ? (modalState.attachments || []) : []
+        };
+
+        try {
+          if (modal.type === 'edit-template') {
+            const templateId = modalState.id;
+            await api("/templates/" + templateId, { method: "PATCH", body: JSON.stringify(payload) });
+          } else {
+            await api("/templates", { method: "POST", body: JSON.stringify(payload) });
           }
+        } catch (err) {
+          alert("Error saving template: " + err.message);
+          return;
         }
-        await syncFromSupabase();
+        await syncFromBackend();
         closeModal();
         renderPage();
       })();
@@ -1940,8 +2591,8 @@ document.addEventListener("click", (e) => {
     case "delete-template": {
       if (confirm("Delete this template?")) {
         (async () => {
-          await supabaseClient.from('templates').delete().eq('id', actionEl.dataset.id);
-          await syncFromSupabase();
+          await api("/templates/" + actionEl.dataset.id, { method: "DELETE" });
+          await syncFromBackend();
           renderPage();
         })();
       }
@@ -1950,34 +2601,88 @@ document.addEventListener("click", (e) => {
 
     // Campaigns
     case "create-campaign": {
-      modalState = { name: "", groupId: "", templateId: "" };
+      modalState = { name: "", groupIds: [], templateId: "" };
       modal = { type: "create-campaign" };
       renderCampaignModal();
       break;
     }
+    case "toggle-group-selection": {
+      const gId = actionEl.dataset.id;
+      if (!modalState.groupIds) modalState.groupIds = [];
+      const index = modalState.groupIds.indexOf(gId);
+      if (index > -1) {
+        modalState.groupIds.splice(index, 1);
+      } else {
+        modalState.groupIds.push(gId);
+      }
+      renderCampaignModal();
+      // Keep dropdown menu open when selecting
+      const dropdown = document.getElementById("group-select-dropdown");
+      if (dropdown) dropdown.style.display = "block";
+      break;
+    }
+    case "deselect-group-chip": {
+      const gId = actionEl.dataset.id;
+      if (modalState.groupIds) {
+        modalState.groupIds = modalState.groupIds.filter(id => id !== gId);
+      }
+      renderCampaignModal();
+      break;
+    }
+    case "filter-templates": {
+      activeTemplateFilter = actionEl.dataset.value;
+      renderTemplatesPage();
+      break;
+    }
+    case "filter-campaigns": {
+      activeCampaignFilter = actionEl.dataset.value;
+      renderCampaignsPage();
+      break;
+    }
     case "save-campaign": {
-      if (!modalState.name.trim() || !modalState.groupId || !modalState.templateId) {
-        alert("Please fill all required fields");
+      if (!modalState.name.trim() || !modalState.groupIds || modalState.groupIds.length === 0 || !modalState.templateId) {
+        alert("Please fill all required fields and select at least one group.");
         return;
       }
 
+      const targetTypeEl = document.querySelector('input[name="m-targetType"]:checked');
+      const isGroupTarget = targetTypeEl && targetTypeEl.value === 'group';
+      const finalCampaignName = modalState.name.trim() + (isGroupTarget ? ' [GROUP TARGET]' : '');
+      const delayEl = document.querySelector('input[name="m-delay"]:checked');
+      const delaySeconds = delayEl ? parseInt(delayEl.value, 10) : 15;
+
       (async () => {
-        const group = groups.find(g => g.id === modalState.groupId);
-        const { data: campInserted, error: campError } = await supabaseClient
-          .from('campaigns')
-          .insert({
-            name: modalState.name.trim(),
-            group_id: modalState.groupId,
-            template_id: modalState.templateId,
-            status: "pending",
-            total_recipients: group ? group.contacts.length : 0
-          })
-          .select();
-        if (campError) {
-          alert("Error creating campaign: " + campError.message);
+        // Calculate total recipient count from all selected groups
+        let totalCount = 0;
+        modalState.groupIds.forEach(gId => {
+          const group = groups.find(g => g.id === gId);
+          if (group) {
+            totalCount += group.contacts.length;
+          }
+        });
+
+        const template = templates.find(t => t.id === modalState.templateId);
+        const onlyInteractions = !!(document.getElementById("m-only-interactions")?.checked);
+
+        try {
+          const created = await api("/campaigns", {
+            method: "POST",
+            body: JSON.stringify({
+              name: finalCampaignName,
+              groupIds: modalState.groupIds,
+              templateId: modalState.templateId,
+              channel: template?.channel || 'whatsapp',
+              delaySeconds: delaySeconds,
+              onlyInteractions: onlyInteractions
+            })
+          });
+          void created;
+        } catch (err) {
+          alert("Error creating campaign: " + err.message);
           return;
         }
-        await syncFromSupabase();
+
+        await syncFromBackend();
         closeModal();
         renderPage();
       })();
@@ -2008,39 +2713,29 @@ document.addEventListener("click", (e) => {
 
       (async () => {
         try {
-          // 2. Set campaign status to 'sending' in Supabase
-          await supabaseClient
-            .from('campaigns')
-            .update({ status: 'sending', started_at: new Date().toISOString() })
-            .eq('id', c.id);
-
-          // 3. Trigger n8n background execution
-          const payload = { campaign_id: c.id };
+          // Trigger the backend campaign engine (replaces n8n webhook)
+          const payload = {
+            waha_session: settingsState.wahaSession || "Tester"
+          };
           if (settingsState.isSandboxMode && settingsState.testPhoneNumber) {
             payload.is_test = true;
             payload.test_phone = settingsState.testPhoneNumber;
           }
 
-          console.log("Sending fetch payload to n8n:", payload);
-
-          const res = await fetch("https://flyblaster-n8n.o7brj8.easypanel.host/webhook/start-campaign", {
+          console.log("Sending campaign start to backend:", c.id, payload);
+          await api("/campaigns/" + c.id + "/start", {
             method: "POST",
-            headers: { "Content-Type": "application/json" },
             body: JSON.stringify(payload)
           });
 
-          console.log("n8n response received, status:", res.status);
-          if (!res.ok) throw new Error("n8n trigger failed");
-
-          // 4. Sync from DB and render page (keeps status as 'sending' since n8n is running)
-          await syncFromSupabase();
+          // Sync from backend and render page (status becomes 'sending')
+          await syncFromBackend();
           renderPage();
         } catch (err) {
           console.error("Error launching campaign:", err);
-          alert("Failed to trigger campaign via backend webhook. Check if your n8n workflow is active.");
+          alert("Failed to start campaign: " + err.message);
           c.status = "failed";
-          await supabaseClient.from('campaigns').update({ status: 'failed' }).eq('id', c.id);
-          await syncFromSupabase();
+          await syncFromBackend();
           renderPage();
         }
       })();
@@ -2071,15 +2766,13 @@ document.addEventListener("click", (e) => {
     case "delete-campaign-confirmed": {
       const campaignId = actionEl.dataset.id;
       (async () => {
-        const { error } = await supabaseClient
-          .from('campaigns')
-          .delete()
-          .eq('id', campaignId);
-        if (error) {
-          alert("Database Error deleting campaign: " + error.message);
-          console.error(error);
+        try {
+          await api("/campaigns/" + campaignId, { method: "DELETE" });
+        } catch (err) {
+          alert("Database Error deleting campaign: " + err.message);
+          console.error(err);
         }
-        await syncFromSupabase();
+        await syncFromBackend();
         closeModal();
         renderPage();
       })();
@@ -2105,15 +2798,46 @@ document.addEventListener("input", (e) => {
   if (!field) return;
   modalState[field] = e.target.value;
 
-  if (modal && (modal.type === 'create-template' || modal.type === 'edit-template') && field === 'message') {
-    const previewTextEl = document.getElementById("whatsapp-preview-text");
-    if (previewTextEl) {
-      previewTextEl.textContent = e.target.value || "Your message preview will appear here...";
+  if (modal && (modal.type === 'create-template' || modal.type === 'edit-template')) {
+    if (field === 'message') {
+      const processSpintax = (text) => text.replace(/\{([^{}]+)\}/g, (match, content) => {
+        const options = content.split('|');
+        return options[Math.floor(Math.random() * options.length)];
+      });
+      const rawVal = e.target.value || "Your message preview will appear here...";
+      const parsedVal = processSpintax(rawVal);
+
+      const previewTextEl = document.getElementById("whatsapp-preview-text");
+      if (previewTextEl) {
+        previewTextEl.innerHTML = escapeHtml(parsedVal);
+      }
+      const emailBodyEl = document.getElementById("email-preview-body");
+      if (emailBodyEl) {
+        emailBodyEl.innerHTML = parsedVal;
+      }
+    }
+    if (field === 'emailSubject') {
+      const emailSubjectEl = document.getElementById("email-preview-subject");
+      if (emailSubjectEl) {
+        emailSubjectEl.textContent = e.target.value || "(No Subject)";
+      }
     }
   }
 });
 
 document.addEventListener("change", (e) => {
+  if (e.target.name === "m-addType") {
+    modalState.contactType = e.target.value;
+    renderAddContactModal();
+    return;
+  }
+
+  if (e.target.dataset.field === "channel") {
+    modalState.channel = e.target.value;
+    renderTemplateModal(modal.type === 'edit-template');
+    return;
+  }
+
   if (e.target.id === "template-media-file") {
     const file = e.target.files[0];
     if (file) {
@@ -2124,6 +2848,29 @@ document.addEventListener("change", (e) => {
       };
       reader.readAsDataURL(file);
     }
+    return;
+  }
+
+  if (e.target.id === "template-attachment-file") {
+    const files = Array.from(e.target.files);
+    if (!modalState.attachments) modalState.attachments = [];
+    
+    let loadedCount = 0;
+    files.forEach(file => {
+      const reader = new FileReader();
+      reader.onload = () => {
+        modalState.attachments.push({
+          name: file.name,
+          type: file.type,
+          data: reader.result
+        });
+        loadedCount++;
+        if (loadedCount === files.length) {
+          renderTemplateModal(modal.type === 'edit-template');
+        }
+      };
+      reader.readAsDataURL(file);
+    });
     return;
   }
 
@@ -2142,6 +2889,22 @@ document.addEventListener("change", (e) => {
         renderAddContactModal();
       });
     }
+    return;
+  }
+
+  if (e.target.classList.contains("campaign-group-checkbox")) {
+    if (!modalState.groupIds) {
+      modalState.groupIds = [];
+    }
+    const val = e.target.value;
+    if (e.target.checked) {
+      if (!modalState.groupIds.includes(val)) {
+        modalState.groupIds.push(val);
+      }
+    } else {
+      modalState.groupIds = modalState.groupIds.filter(id => id !== val);
+    }
+    modalState.groupId = modalState.groupIds[0] || "";
     return;
   }
 
@@ -2242,14 +3005,125 @@ document.addEventListener("input", (e) => {
   }
 });
 
-renderPage();
-syncFromSupabase().then(() => {
+let currentUser = null;
+let syncInterval = null;
+
+// Restore session on load (backend JWT)
+let lastDataSignature = "";
+
+// Compute a lightweight signature of the app state so we can detect real changes
+function dataSignature() {
+  const sig = {
+    g: groups.map(g => g.id + ':' + g.contacts.length).join(','),
+    t: templates.map(t => t.id + ':' + t.channel).join(','),
+    c: campaigns.map(c => c.id + ':' + c.status + ':' + c.sentCount + ':' + c.failedCount).join(','),
+    d: dailyStats.messagesSent + '/' + dailyStats.limit
+  };
+  return JSON.stringify(sig);
+}
+
+async function initAuth() {
+  const loginOverlay = document.getElementById("login-overlay");
+  const appContainer = document.querySelector(".app");
+
+  if (authToken) {
+    try {
+      const me = await api("/auth/me");
+      currentUser = { id: me.id, email: me.email };
+      if (loginOverlay) loginOverlay.style.display = "none";
+      if (appContainer) appContainer.style.display = "flex";
+      await syncFromBackend();
+      lastDataSignature = dataSignature();
+      renderPage();
+      if (!syncInterval) {
+        syncInterval = setInterval(async () => {
+          // Never disturb the user while they're in a modal, editing, or typing
+          if (modal || isEditingGroup || editingContactIndex !== null || currentUser === null) return;
+          // Don't re-render if nothing meaningful changed
+          const before = dataSignature();
+          try { await syncFromBackend(); } catch (e) { console.error("Interval sync error:", e); return; }
+          const after = dataSignature();
+          if (before !== after) {
+            lastDataSignature = after;
+            renderPage();
+          }
+        }, 15000); // slower: every 15s, and only re-renders on real change
+      }
+      return;
+    } catch (err) {
+      // Token invalid/expired
+      authToken = null;
+      localStorage.removeItem("fly_blaster_token");
+    }
+  }
+  currentUser = null;
+  if (loginOverlay) loginOverlay.style.display = "flex";
+  if (appContainer) appContainer.style.display = "flex";
   renderPage();
+}
+
+// Boot auth on page load
+initAuth();
+
+// Handle login form submission
+document.getElementById("login-form")?.addEventListener("submit", async (e) => {
+  e.preventDefault();
+  const email = document.getElementById("login-email").value.trim();
+  const password = document.getElementById("login-password").value;
+  const errorEl = document.getElementById("login-error");
+  const submitBtn = e.target.querySelector("button[type='submit']");
+
+  if (errorEl) errorEl.style.display = "none";
+  if (submitBtn) {
+    submitBtn.disabled = true;
+    submitBtn.textContent = "Signing In...";
+  }
+
+  try {
+    const data = await api("/auth/login", {
+      method: "POST",
+      body: JSON.stringify({ email, password })
+    });
+    authToken = data.token;
+    localStorage.setItem("fly_blaster_token", data.token);
+    currentUser = { id: data.user.id, email: data.user.email };
+    const loginOverlay = document.getElementById("login-overlay");
+    if (loginOverlay) loginOverlay.style.display = "none";
+    document.querySelector(".app").style.display = "flex";
+    await syncFromBackend();
+    renderPage();
+  } catch (err) {
+    if (errorEl) {
+      errorEl.textContent = err.message || "Invalid login credentials";
+      errorEl.style.display = "block";
+    }
+  } finally {
+    if (submitBtn) {
+      submitBtn.disabled = false;
+      submitBtn.textContent = "Sign In";
+    }
+  }
 });
 
-setInterval(async () => {
-  if (!modal && !isEditingGroup) {
-    await syncFromSupabase();
-    renderPage();
+// Handle logout button click
+document.getElementById("logout-btn")?.addEventListener("click", async () => {
+  if (confirm("Are you sure you want to logout?")) {
+    authToken = null;
+    localStorage.removeItem("fly_blaster_token");
+    currentUser = null;
+    const loginOverlay = document.getElementById("login-overlay");
+    if (loginOverlay) loginOverlay.style.display = "flex";
+    location.reload();
   }
-}, 5000);
+});
+
+// Mobile menu toggle logic
+document.getElementById("menu-toggle-btn")?.addEventListener("click", () => {
+  document.querySelector(".sidebar")?.classList.add("open");
+  document.getElementById("sidebar-overlay")?.classList.add("visible");
+});
+
+document.getElementById("sidebar-overlay")?.addEventListener("click", () => {
+  document.querySelector(".sidebar")?.classList.remove("open");
+  document.getElementById("sidebar-overlay")?.classList.remove("visible");
+});

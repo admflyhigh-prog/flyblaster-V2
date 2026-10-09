@@ -1,0 +1,21 @@
+{
+  "name": "flyblaster-backend",
+  "version": "2.0.0",
+  "description": "Local Node.js backend for Fly Blaster — replaces Supabase + n8n. Talks to WAHA and MySQL.",
+  "type": "commonjs",
+  "main": "server.js",
+  "scripts": {
+    "start": "node server.js",
+    "db:init": "mysql -u root < schema.sql",
+    "db:reset": "mysql -u root -e \"DROP DATABASE IF EXISTS flyblaster;\" && mysql -u root < schema.sql"
+  },
+  "dependencies": {
+    "bcryptjs": "^2.4.3",
+    "cors": "^2.8.5",
+    "dotenv": "^16.4.5",
+    "express": "^4.19.2",
+    "jsonwebtoken": "^9.0.2",
+    "mysql2": "^3.11.0",
+    "node-fetch": "^2.7.0"
+  }
+}

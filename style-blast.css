@@ -296,15 +296,7 @@ body {
 }
 .table-row:last-child { border-bottom: none; }
 
-#page-group-detail .table-card:not(.edit-active) .table-head :nth-child(3),
-#page-group-detail .table-card:not(.edit-active) .table-row :nth-child(3) {
-  grid-column: 4;
-}
 
-#page-group-detail .table-card.edit-active .table-head,
-#page-group-detail .table-card.edit-active .table-row {
-  grid-template-columns: 50px 2fr 1.5fr 1fr;
-}
 
 .contact-checkbox, #select-all-contacts {
   width: 16px;
@@ -1737,4 +1729,142 @@ textarea.text-input {
     grid-template-columns: 2fr 120px 140px 100px 180px;
     font-size: 12px;
   }
+}
+
+/* ---------- Mobile Responsive Styles ---------- */
+
+.mobile-header {
+  display: none;
+  height: 56px;
+  background: var(--card);
+  border-bottom: 1px solid var(--border-soft);
+  align-items: center;
+  padding: 0 16px;
+  gap: 16px;
+  position: sticky;
+  top: 0;
+  z-index: 999;
+}
+
+.menu-toggle {
+  background: none;
+  border: none;
+  color: var(--text);
+  cursor: pointer;
+  padding: 8px;
+  margin-left: -8px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  border-radius: 8px;
+  transition: background 0.2s;
+}
+.menu-toggle:hover {
+  background: var(--border-soft);
+}
+
+.mobile-brand-name {
+  font-size: 16px;
+  font-weight: 750;
+  color: var(--text);
+  letter-spacing: -0.3px;
+}
+
+.sidebar-overlay {
+  display: none;
+  position: fixed;
+  inset: 0;
+  background: rgba(15, 11, 30, 0.4);
+  backdrop-filter: blur(4px);
+  z-index: 998;
+}
+
+@media (max-width: 768px) {
+  .mobile-header {
+    display: flex;
+  }
+
+  .app {
+    flex-direction: column;
+  }
+
+  .sidebar {
+    position: fixed;
+    top: 0;
+    bottom: 0;
+    left: 0;
+    width: 250px;
+    transform: translateX(-100%);
+    transition: transform 0.3s cubic-bezier(0.4, 0, 0.2, 1);
+    z-index: 1000;
+    box-shadow: 20px 0 50px rgba(0, 0, 0, 0.15);
+  }
+
+  .sidebar.open {
+    transform: translateX(0);
+  }
+
+  .sidebar-overlay.visible {
+    display: block;
+  }
+
+  .main {
+    padding: 16px 12px;
+  }
+
+  /* Grid details page stacks on mobile */
+  .template-modal-grid {
+    grid-template-columns: 1fr !important;
+    gap: 16px !important;
+  }
+
+  /* Table cards and scroll views */
+  .table-card, .campaigns-table {
+    overflow-x: auto;
+    -webkit-overflow-scrolling: touch;
+  }
+
+  .table-head, .table-row, .campaigns-table-header, .campaign-row {
+    min-width: 600px; /* Ensure content is readable and doesn't get squished */
+  }
+
+  /* Modals fit to screen */
+  .modal-dialog {
+    width: 100% !important;
+    height: 100% !important;
+    max-width: 100% !important;
+    max-height: 100% !important;
+    border-radius: 0 !important;
+    margin: 0 !important;
+    display: flex;
+    flex-direction: column;
+  }
+
+  .modal-body {
+    flex: 1;
+    overflow-y: auto;
+  }
+}
+
+.group-dropdown-item:hover {
+  background: var(--border-soft, #F5F4FA) !important;
+}
+.group-dropdown-item:active {
+  background: var(--violet-light, #EDE6FC) !important;
+}
+.group-select-chip .chip-remove-btn:hover {
+  color: var(--red, #ef4444) !important;
+  transform: scale(1.15);
+}
+.group-select-chip {
+  transition: all 0.2s ease;
+}
+
+/* Quill & Email Preview Image Constraints */
+.ql-editor img, #email-preview-body img {
+  max-width: 100%;
+  height: auto;
+  border-radius: 8px;
+  display: block;
+  margin: 10px 0;
 }

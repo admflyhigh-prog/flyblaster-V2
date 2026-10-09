@@ -1,0 +1,53 @@
+# Fly Blaster — dedicated services (isolated from pos_qr_ordering)
+# - flyblaster-db : dedicated MySQL 8.0 container with its own volume + credentials
+# - flyblaster-api: Node backend (DB layer + WAHA integration + sending)
+#
+# Both join the shared "easypanel" docker network so the API can reach the DB
+# by hostname "flyblaster-db". The POS platform's containers/volumes are NOT touched.
+
+services:
+  db:
+    image: mysql:8.0
+    container_name: flyblaster-db
+    restart: unless-stopped
+    environment:
+      MYSQL_ROOT_PASSWORD: flyblaster_rootpass
+      MYSQL_DATABASE: flyblaster
+      MYSQL_USER: flyblaster
+      MYSQL_PASSWORD: flyblaster_pass
+    volumes:
+      - flyblaster_db_data:/var/lib/mysql
+      - ./schema.sql:/docker-entrypoint-initdb.d/01-schema.sql:ro
+    networks:
+      - easypanel
+
+  api:
+    build: .
+    container_name: flyblaster-api
+    restart: unless-stopped
+    depends_on:
+      - db
+    environment:
+      PORT: 8091
+      DB_HOST: flyblaster-db
+      DB_PORT: 3306
+      DB_USER: flyblaster
+      DB_PASSWORD: flyblaster_pass
+      DB_NAME: flyblaster
+      WAHA_BASE_URL: http://150.109.5.90:3000
+      WAHA_API_KEY: ""
+      ADMIN_EMAIL: admin@flyblaster.local
+      ADMIN_PASSWORD: admin123
+      JWT_SECRET: flyblaster-local-secret-change-me
+      FRONTEND_ORIGIN: http://localhost:8090
+    ports:
+      - "8091:8091"
+    networks:
+      - easypanel
+
+volumes:
+  flyblaster_db_data:
+
+networks:
+  easypanel:
+    external: true

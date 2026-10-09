@@ -1,0 +1,63 @@
+version: '3.8'
+
+services:
+  flyblaster-db:
+    image: mysql:8.0
+    container_name: flyblaster-db
+    restart: unless-stopped
+    environment:
+      MYSQL_ROOT_PASSWORD: flyblaster_rootpass
+      MYSQL_DATABASE: flyblaster
+      MYSQL_USER: flyblaster
+      MYSQL_PASSWORD: flyblaster_pass
+    volumes:
+      - flyblaster_db_data:/var/lib/mysql
+      - ./backend/schema.sql:/docker-entrypoint-initdb.d/01-schema.sql:ro
+    networks:
+      - flyblaster-net
+
+  flyblaster-api:
+    build:
+      context: ./backend
+      dockerfile: Dockerfile
+    container_name: flyblaster-api
+    restart: unless-stopped
+    depends_on:
+      - flyblaster-db
+    environment:
+      PORT: 8091
+      DB_HOST: flyblaster-db
+      DB_PORT: 3306
+      DB_USER: flyblaster
+      DB_PASSWORD: flyblaster_pass
+      DB_NAME: flyblaster
+      WAHA_BASE_URL: http://150.109.5.90:3000
+      WAHA_API_KEY: ""
+      ADMIN_EMAIL: admin@flyblaster.local
+      ADMIN_PASSWORD: admin123
+      JWT_SECRET: flyblaster-secret-key-production
+      FRONTEND_ORIGIN: "*"
+    ports:
+      - "8091:8091"
+    networks:
+      - flyblaster-net
+
+  flyblaster-web:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    container_name: flyblaster-web
+    restart: unless-stopped
+    depends_on:
+      - flyblaster-api
+    ports:
+      - "8090:80"
+    networks:
+      - flyblaster-net
+
+volumes:
+  flyblaster_db_data:
+
+networks:
+  flyblaster-net:
+    driver: bridge
