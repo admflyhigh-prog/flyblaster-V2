@@ -1184,8 +1184,10 @@ function renderScanSenderQrModal(senderId, senderName) {
       }
       unreachableStreak = 0;
       const qr = await api(`/senders/${senderId}/qr-image`);
-      if (qr && qr.qr) {
+      if (qr && qr.qr && qr.qr.startsWith("data:image/") && !qr.qr.includes("<")) {
         box.innerHTML = `<img src="${qr.qr}" alt="WhatsApp QR" style="width: 240px; height: 240px; border-radius: 8px;" />`;
+      } else if (qr && qr.error) {
+        box.innerHTML = `<div style="color: var(--red); font-size: 12px; padding: 12px;">${escapeHtml(qr.error)}</div>`;
       } else {
         box.innerHTML = `<div style="color: var(--text-muted); font-size: 12.5px; padding: 12px;">Waiting for QR...</div>`;
       }

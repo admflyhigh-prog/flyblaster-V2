@@ -114,6 +114,9 @@ router.get('/senders/:id/qr-image', async (req, res) => {
     if (!qr) return res.status(404).json({ error: 'No QR available yet — keep this open, it refreshes' });
     const b64 = qr.qr || qr.base64 || qr.image || (typeof qr === 'string' ? qr : null);
     if (!b64) return res.status(404).json({ error: 'No QR data yet' });
+    if (typeof b64 === 'string' && (b64.trim().startsWith('<') || b64.includes('<!doctype') || b64.includes('<html'))) {
+      return res.status(502).json({ error: 'WAHA endpoint returned HTML instead of a QR code image. Please verify WAHA service URL and port.' });
+    }
     const dataUrl = b64.startsWith('data:') ? b64 : `data:image/png;base64,${b64}`;
     res.json({ senderId: rows[0].id, session, qr: dataUrl });
   } catch (e) {
@@ -187,6 +190,9 @@ router.get('/waha/session/qr-image', async (req, res) => {
     // WAHA returns base64 or raw png
     const b64 = qr.qr || qr.base64 || qr.image || (typeof qr === 'string' ? qr : null);
     if (!b64) return res.status(404).json({ error: 'No QR data' });
+    if (typeof b64 === 'string' && (b64.trim().startsWith('<') || b64.includes('<!doctype') || b64.includes('<html'))) {
+      return res.status(502).json({ error: 'WAHA endpoint returned HTML instead of a QR code image. Please verify WAHA service URL and port.' });
+    }
     const dataUrl = b64.startsWith('data:') ? b64 : `data:image/png;base64,${b64}`;
     res.json({ session, qr: dataUrl });
   } catch (e) {
