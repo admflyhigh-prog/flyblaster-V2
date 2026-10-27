@@ -90,7 +90,7 @@ function authRequired(req, res, next) {
 
 /* ---------------- WAHA client ---------------- */
 async function wahaRequest(path, { method = 'GET', body, timeout = 30000 } = {}) {
-  const headers = { 'Content-Type': 'application/json' };
+  const headers = { 'Content-Type': 'application/json', 'Accept': 'application/json' };
   if (WAHA_API_KEY) headers['X-Api-Key'] = WAHA_API_KEY;
   const controller = new AbortController();
   const timer = setTimeout(() => controller.abort(), timeout);

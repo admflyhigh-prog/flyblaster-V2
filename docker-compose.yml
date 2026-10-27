@@ -16,6 +16,21 @@ services:
     networks:
       - flyblaster-net
 
+  flyblaster-waha:
+    image: devlikeapro/waha
+    container_name: flyblaster-waha
+    platform: linux/amd64
+    restart: unless-stopped
+    environment:
+      WHATSAPP_DEFAULT_ENGINE: WEBJS
+      WAHA_API_KEY: flyblaster_waha_key
+    ports:
+      - "3000:3000"
+    volumes:
+      - flyblaster_waha_data:/app/.sessions
+    networks:
+      - flyblaster-net
+
   flyblaster-api:
     build:
       context: ./backend
@@ -24,6 +39,7 @@ services:
     restart: unless-stopped
     depends_on:
       - flyblaster-db
+      - flyblaster-waha
     environment:
       PORT: 8091
       DB_HOST: flyblaster-db
@@ -31,8 +47,8 @@ services:
       DB_USER: flyblaster
       DB_PASSWORD: flyblaster_pass
       DB_NAME: flyblaster
-      WAHA_BASE_URL: http://150.109.5.90:3000
-      WAHA_API_KEY: ""
+      WAHA_BASE_URL: http://flyblaster-waha:3000
+      WAHA_API_KEY: "flyblaster_waha_key"
       ADMIN_EMAIL: admin@flyblaster.local
       ADMIN_PASSWORD: admin123
       JWT_SECRET: flyblaster-secret-key-production
@@ -57,6 +73,7 @@ services:
 
 volumes:
   flyblaster_db_data:
+  flyblaster_waha_data:
 
 networks:
   flyblaster-net:

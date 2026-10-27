@@ -99,6 +99,49 @@ router.delete('/senders/:id', async (req, res) => {
   }
 });
 
+/* ================= Session / QR Helpers ================= */
+async function ensureSessionStarted(session) {
+  try {
+    await wahaRequest(`/api/sessions/start`, { method: 'POST', body: { name: session }, timeout: 8000 });
+  } catch (_) {
+    try {
+      await wahaRequest(`/api/sessions/${encodeURIComponent(session)}/start`, { method: 'POST', timeout: 8000 });
+    } catch (_) {}
+  }
+}
+
+async function fetchSessionQr(session) {
+  let qr = null;
+  // Modern WAHA endpoint: /api/:session/auth/qr
+  try {
+    qr = await wahaRequest(`/api/${encodeURIComponent(session)}/auth/qr`, { timeout: 8000 });
+  } catch (e) {
+    // Legacy fallback: /api/sessions/:session/qr
+    try {
+      qr = await wahaRequest(`/api/sessions/${encodeURIComponent(session)}/qr`, { timeout: 8000 });
+    } catch (_) {}
+  }
+  if (!qr) return null;
+  const b64 = qr.data || qr.qr || qr.base64 || qr.image || (typeof qr === 'string' ? qr : null);
+  if (!b64) return null;
+  if (typeof b64 === 'string' && (b64.trim().startsWith('<') || b64.includes('<!doctype') || b64.includes('<html'))) {
+    throw new Error('WAHA endpoint returned HTML instead of a QR code image. Please verify WAHA service URL and port.');
+  }
+  return b64.startsWith('data:') ? b64 : `data:image/png;base64,${b64}`;
+}
+
+async function fetchSessionStatus(session) {
+  let info = null;
+  try {
+    info = await wahaRequest(`/api/sessions/${encodeURIComponent(session)}`, { timeout: 8000 });
+  } catch (e) {
+    try {
+      info = await wahaRequest(`/api/sessions/${encodeURIComponent(session)}/status`, { timeout: 8000 });
+    } catch (_) {}
+  }
+  return info;
+}
+
 /* ================= Session / QR (per sender) ================= */
 // GET /api/senders/:id/qr-image  ->  QR data URL for a specific sender session
 router.get('/senders/:id/qr-image', async (req, res) => {
@@ -107,17 +150,10 @@ router.get('/senders/:id/qr-image', async (req, res) => {
     if (rows.length === 0) return res.status(404).json({ error: 'Sender not found' });
     const session = rows[0].waha_session;
 
-    // Start session (short timeout so it doesn't buffer)
-    try { await wahaRequest(`/api/sessions/${encodeURIComponent(session)}/start`, { method: 'POST', timeout: 8000 }); } catch (_) {}
+    await ensureSessionStarted(session);
+    const dataUrl = await fetchSessionQr(session);
+    if (!dataUrl) return res.status(404).json({ error: 'No QR available yet — keep this open, it refreshes' });
 
-    const qr = await wahaRequest(`/api/sessions/${encodeURIComponent(session)}/qr`, { timeout: 8000 });
-    if (!qr) return res.status(404).json({ error: 'No QR available yet — keep this open, it refreshes' });
-    const b64 = qr.qr || qr.base64 || qr.image || (typeof qr === 'string' ? qr : null);
-    if (!b64) return res.status(404).json({ error: 'No QR data yet' });
-    if (typeof b64 === 'string' && (b64.trim().startsWith('<') || b64.includes('<!doctype') || b64.includes('<html'))) {
-      return res.status(502).json({ error: 'WAHA endpoint returned HTML instead of a QR code image. Please verify WAHA service URL and port.' });
-    }
-    const dataUrl = b64.startsWith('data:') ? b64 : `data:image/png;base64,${b64}`;
     res.json({ senderId: rows[0].id, session, qr: dataUrl });
   } catch (e) {
     res.status(500).json({ error: 'Failed to get QR: ' + e.message });
@@ -132,8 +168,8 @@ router.get('/senders/:id/status', async (req, res) => {
     const s = rows[0];
     let connected = false, phone = s.phone || null, error = null;
     try {
-      const info = await wahaRequest(`/api/sessions/${encodeURIComponent(s.waha_session)}/status`, { timeout: 8000 });
-      connected = !!(info && (info.status === 'WORKING' || info.connected));
+      const info = await fetchSessionStatus(s.waha_session);
+      connected = !!(info && (info.status === 'WORKING' || info.status === 'CONNECTED' || info.connected));
       if (!phone && info && (info.me?.id || info.user?.id)) phone = normalizeJidToPhone(info.me?.id || info.user?.id);
     } catch (e) { error = e.message; }
     res.json({ id: s.id, name: s.name, session: s.waha_session, connected, phone, error });
@@ -150,8 +186,8 @@ router.get('/waha/session/status', async (req, res) => {
 
     let status = { connected: false, session, error: null };
     try {
-      const info = await wahaRequest(`/api/sessions/${encodeURIComponent(session)}/status`, { timeout: 8000 });
-      status.connected = !!(info && (info.status === 'WORKING' || info.connected));
+      const info = await fetchSessionStatus(session);
+      status.connected = !!(info && (info.status === 'WORKING' || info.status === 'CONNECTED' || info.connected));
       status.raw = info;
     } catch (e) {
       status.error = e.message;
@@ -162,38 +198,16 @@ router.get('/waha/session/status', async (req, res) => {
   }
 });
 
-// GET /api/waha/session/qr  ->  starts session & returns QR (base64) so it can be shown in Settings
-router.get('/waha/session/qr', async (req, res) => {
-  try {
-    const [settings] = await pool.query("SELECT setting_value FROM system_settings WHERE setting_key = 'waha_session'");
-    const session = settings.length ? settings[0].setting_value : 'Tester';
-
-    // Ensure session is starting
-    try { await wahaRequest(`/api/sessions/${encodeURIComponent(session)}/start`, { method: 'POST', timeout: 8000 }); } catch (_) {}
-
-    // Fetch the QR
-    const qr = await wahaRequest(`/api/sessions/${encodeURIComponent(session)}/qr`, { timeout: 8000 });
-    res.json({ session, qr: qr ? (qr.qr || qr.base64 || qr.image || qr) : null, raw: qr });
-  } catch (e) {
-    res.status(500).json({ error: 'Failed to get QR: ' + e.message });
-  }
-});
-
 // GET /api/waha/session/qr-image  ->  QR as data URL (base64 PNG), for direct <img src>
 router.get('/waha/session/qr-image', async (req, res) => {
   try {
     const [settings] = await pool.query("SELECT setting_value FROM system_settings WHERE setting_key = 'waha_session'");
     const session = settings.length ? settings[0].setting_value : 'Tester';
-    try { await wahaRequest(`/api/sessions/${encodeURIComponent(session)}/start`, { method: 'POST', timeout: 8000 }); } catch (_) {}
-    const qr = await wahaRequest(`/api/sessions/${encodeURIComponent(session)}/qr`, { timeout: 8000 });
-    if (!qr) return res.status(404).json({ error: 'No QR available yet' });
-    // WAHA returns base64 or raw png
-    const b64 = qr.qr || qr.base64 || qr.image || (typeof qr === 'string' ? qr : null);
-    if (!b64) return res.status(404).json({ error: 'No QR data' });
-    if (typeof b64 === 'string' && (b64.trim().startsWith('<') || b64.includes('<!doctype') || b64.includes('<html'))) {
-      return res.status(502).json({ error: 'WAHA endpoint returned HTML instead of a QR code image. Please verify WAHA service URL and port.' });
-    }
-    const dataUrl = b64.startsWith('data:') ? b64 : `data:image/png;base64,${b64}`;
+
+    await ensureSessionStarted(session);
+    const dataUrl = await fetchSessionQr(session);
+    if (!dataUrl) return res.status(404).json({ error: 'No QR available yet' });
+
     res.json({ session, qr: dataUrl });
   } catch (e) {
     res.status(500).json({ error: 'Failed to get QR: ' + e.message });
