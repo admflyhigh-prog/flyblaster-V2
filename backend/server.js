@@ -13,8 +13,14 @@ const crypto = require('crypto');
 
 const app = express();
 app.use(express.json({ limit: '50mb' }));
+
+const frontendOriginEnv = process.env.FRONTEND_ORIGIN || '*';
+const corsOrigin = frontendOriginEnv === '*' 
+  ? true 
+  : (frontendOriginEnv.includes(',') ? frontendOriginEnv.split(',').map(s => s.trim()) : frontendOriginEnv);
+
 app.use(cors({
-  origin: (process.env.FRONTEND_ORIGIN || 'http://localhost:8090').split(','),
+  origin: corsOrigin,
   credentials: true
 }));
 

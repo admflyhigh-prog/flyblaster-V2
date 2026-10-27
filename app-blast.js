@@ -182,7 +182,9 @@ function processCsvNumbers(numbers) {
 
 /* Backend API client — replaces Supabase + n8n.
    The backend (backend/server.js) talks to the dedicated MySQL + WAHA. */
-const API_BASE = "http://localhost:8091/api";
+const API_BASE = (typeof window !== "undefined" && window.location
+  ? (window.location.protocol === "https:" ? "https://" : "http://") + (window.location.hostname || "localhost") + ":8091/api"
+  : "http://localhost:8091/api");
 
 let authToken = localStorage.getItem("fly_blaster_token") || null;
 
