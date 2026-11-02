@@ -4,10 +4,40 @@
    - Detect prior interactions (received/replied) for individual + group chats
 */
 const { Router } = require('express');
-const { app, pool, wahaRequest, cleanPhone, phoneToJid, normalizeJidToPhone, authRequired } = require('../server');
+const {
+  app, pool, wahaRequest, cleanPhone, phoneToJid, normalizeJidToPhone, authRequired,
+  wahaGroups, wahaGroupDetail, wahaChats, wahaChatMessages,
+  wahaStartSession, wahaLogoutSession
+} = require('../server');
 
 const router = Router();
 router.use(authRequired);
+
+/* WAHA version compatibility:
+   Older WAHA: GET /api/sessions/{name}/status
+   WAHA 2026.x: GET /api/sessions/{name}  (returns { status, me })
+   We try the modern endpoint first, then fall back to /status. */
+async function getSessionInfo(session, timeout = 15000) {
+  const enc = encodeURIComponent(session);
+  try {
+    return await wahaRequest(`/api/sessions/${enc}`, { timeout });
+  } catch (e) {
+    if (e && e.status === 404) {
+      return await wahaRequest(`/api/sessions/${enc}/status`, { timeout });
+    }
+    throw e;
+  }
+}
+
+function isSessionConnected(info) {
+  if (!info) return false;
+  return info.status === 'WORKING' || info.connected === true;
+}
+
+function sessionPhone(info) {
+  const id = info && (info.me?.id || info.user?.id);
+  return id ? normalizeJidToPhone(id) : null;
+}
 
 /* ================= Senders (session management, like WAHA list) ================= */
 
@@ -19,11 +49,9 @@ router.get('/senders', async (req, res) => {
     for (const s of rows) {
       let connected = false, phone = s.phone || null, error = null;
       try {
-        const info = await wahaRequest(`/api/sessions/${encodeURIComponent(s.waha_session)}/status`);
-        connected = !!(info && (info.status === 'WORKING' || info.connected));
-        if (!phone && info && (info.me?.id || info.user?.id)) {
-          phone = normalizeJidToPhone(info.me?.id || info.user?.id);
-        }
+        const info = await getSessionInfo(s.waha_session);
+        connected = isSessionConnected(info);
+        if (!phone) phone = sessionPhone(info);
       } catch (e) {
         error = e.message;
       }
@@ -91,7 +119,7 @@ router.delete('/senders/:id', async (req, res) => {
     const [rows] = await pool.query('SELECT * FROM senders WHERE id = ?', [req.params.id]);
     if (rows.length === 0) return res.status(404).json({ error: 'Sender not found' });
     const s = rows[0];
-    try { await wahaRequest(`/api/sessions/${encodeURIComponent(s.waha_session)}/logout`, { method: 'POST' }); } catch (_) {}
+    try { await wahaLogoutSession(s.waha_session); } catch (_) {}
     await pool.query('DELETE FROM senders WHERE id = ?', [req.params.id]);
     res.json({ ok: true });
   } catch (e) {
@@ -219,7 +247,7 @@ router.post('/waha/session/logout', async (req, res) => {
   try {
     const [settings] = await pool.query("SELECT setting_value FROM system_settings WHERE setting_key = 'waha_session'");
     const session = settings.length ? settings[0].setting_value : 'Tester';
-    await wahaRequest(`/api/sessions/${encodeURIComponent(session)}/logout`, { method: 'POST', timeout: 8000 });
+    await wahaLogoutSession(session, 8000);
     res.json({ ok: true });
   } catch (e) {
     res.status(500).json({ error: e.message });
@@ -232,7 +260,7 @@ router.get('/waha/groups', async (req, res) => {
   try {
     const [settings] = await pool.query("SELECT setting_value FROM system_settings WHERE setting_key = 'waha_session'");
     const session = settings.length ? settings[0].setting_value : 'Tester';
-    const groups = await wahaRequest(`/api/sessions/${encodeURIComponent(session)}/groups`);
+    const groups = await wahaGroups(session);
     const list = (Array.isArray(groups) ? groups : []).map(g => ({
       id: g.id, name: g.name || g.id, participants: (g.participants || []).length
     }));
@@ -247,7 +275,7 @@ router.get('/waha/groups/:id', async (req, res) => {
   try {
     const [settings] = await pool.query("SELECT setting_value FROM system_settings WHERE setting_key = 'waha_session'");
     const session = settings.length ? settings[0].setting_value : 'Tester';
-    const group = await wahaRequest(`/api/sessions/${encodeURIComponent(session)}/groups/${encodeURIComponent(req.params.id)}`);
+    const group = await wahaGroupDetail(session, req.params.id);
     const participants = (group.participants || []).map(p => ({
       jid: p.id || p.jid || null,
       name: p.name || p.pushName || '',
@@ -269,7 +297,7 @@ router.post('/waha/groups/import', async (req, res) => {
     const [settings] = await pool.query("SELECT setting_value FROM system_settings WHERE setting_key = 'waha_session'");
     const session = settings.length ? settings[0].setting_value : 'Tester';
 
-    const group = await wahaRequest(`/api/sessions/${encodeURIComponent(session)}/groups/${encodeURIComponent(wahaGroupId)}`);
+    const group = await wahaGroupDetail(session, wahaGroupId);
     const participants = (group.participants || [])
       .map(p => ({ jid: p.id || p.jid, name: p.name || p.pushName || '', phone: normalizeJidToPhone(p.id || p.jid) }))
       .filter(p => p.phone);
@@ -326,7 +354,7 @@ router.post('/waha/interactions/scan', async (req, res) => {
     const session = settings.length ? settings[0].setting_value : 'Tester';
 
     // 1. Get all chats
-    const chats = await wahaRequest(`/api/sessions/${encodeURIComponent(session)}/chats`);
+    const chats = await wahaChats(session);
     if (!Array.isArray(chats)) throw new Error('Unexpected chats response');
 
     const ownPhone = await getOwnNumber(session);
@@ -342,7 +370,7 @@ router.post('/waha/interactions/scan', async (req, res) => {
       // Fetch recent messages for this chat
       let messages = [];
       try {
-        messages = await wahaRequest(`/api/sessions/${encodeURIComponent(session)}/chats/${encodeURIComponent(chatId)}/messages?limit=50`);
+        messages = await wahaChatMessages(session, chatId, 50);
         if (!Array.isArray(messages)) messages = [];
       } catch (_) { /* skip chats we can't read */ }
 
@@ -407,8 +435,8 @@ router.get('/waha/interactions', async (req, res) => {
 
 async function getOwnNumber(session) {
   try {
-    const info = await wahaRequest(`/api/sessions/${encodeURIComponent(session)}/status`);
-    return info.me?.id || info.user?.id || null;
+    const info = await getSessionInfo(session, 15000);
+    return info?.me?.id || info?.user?.id || null;
   } catch (_) {
     return null;
   }

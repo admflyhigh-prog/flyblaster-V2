@@ -1,11 +1,11 @@
-# Use the official lightweight Nginx Alpine image
+# Fly Blaster — static frontend (nginx)
+# Build context: repository root. Only `frontend/` is copied into the image;
+# everything else is excluded via .dockerignore (never expose backend/ or secrets).
 FROM nginx:alpine
 
-# Copy all static website assets to the default Nginx public directory
-COPY . /usr/share/nginx/html
+# Static assets only
+COPY frontend/ /usr/share/nginx/html/
 
-# Expose port 80 for web traffic
 EXPOSE 80
 
-# Start Nginx server
 CMD ["nginx", "-g", "daemon off;"]

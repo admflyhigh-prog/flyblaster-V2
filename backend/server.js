@@ -115,7 +115,125 @@ async function wahaRequest(path, { method = 'GET', body, timeout = 30000 } = {})
   }
 }
 
-/* ---------------- Ensure default admin user ---------------- */
+/* ---------------- WAHA version-compatible helpers ----------------
+   WAHA changed its URL layout across versions:
+     older : /api/sessions/{session}/groups | /chats | /qr | /sendText
+     v2026 : /api/{session}/groups | /chats | /auth/qr  + root /api/sendText (session in body)
+   Each helper tries the modern path first and falls back to the legacy one.
+*/
+async function wahaTry(paths, opts) {
+  let lastErr = null;
+  for (const p of paths) {
+    try {
+      return await wahaRequest(p, opts);
+    } catch (e) {
+      lastErr = e;
+      // Only fall through on "route not found"; rethrow real errors
+      if (!(e && e.status === 404)) throw e;
+    }
+  }
+  throw lastErr;
+}
+
+const enc = encodeURIComponent;
+
+// GET session-scoped resource (groups, chats, qr, ...)
+function wahaSessionGet(session, subPath, timeout = 30000) {
+  return wahaTry(
+    [`/api/${enc(session)}/${subPath}`, `/api/sessions/${enc(session)}/${subPath}`],
+    { timeout }
+  );
+}
+
+// Groups list
+function wahaGroups(session, timeout = 30000) {
+  return wahaSessionGet(session, 'groups', timeout);
+}
+
+// Single group detail
+function wahaGroupDetail(session, groupId, timeout = 30000) {
+  return wahaTry(
+    [
+      `/api/${enc(session)}/groups/${enc(groupId)}`,
+      `/api/sessions/${enc(session)}/groups/${enc(groupId)}`
+    ],
+    { timeout }
+  );
+}
+
+// Chats list
+function wahaChats(session, timeout = 30000) {
+  return wahaSessionGet(session, 'chats', timeout);
+}
+
+// Messages in a chat
+function wahaChatMessages(session, chatId, limit = 50, timeout = 30000) {
+  return wahaTry(
+    [
+      `/api/${enc(session)}/chats/${enc(chatId)}/messages?limit=${limit}`,
+      `/api/sessions/${enc(session)}/chats/${enc(chatId)}/messages?limit=${limit}`
+    ],
+    { timeout }
+  );
+}
+
+// QR code (modern path lives under /auth/qr)
+function wahaQr(session, timeout = 15000) {
+  return wahaTry(
+    [
+      `/api/${enc(session)}/auth/qr?format=image`,
+      `/api/${enc(session)}/auth/qr`,
+      `/api/sessions/${enc(session)}/qr`
+    ],
+    { timeout }
+  );
+}
+
+// Start a session
+function wahaStartSession(session, timeout = 15000) {
+  return wahaTry(
+    [
+      `/api/sessions/${enc(session)}/start`,
+      `/api/${enc(session)}/start`
+    ],
+    { method: 'POST', timeout }
+  );
+}
+
+// Logout a session
+function wahaLogoutSession(session, timeout = 15000) {
+  return wahaTry(
+    [
+      `/api/sessions/${enc(session)}/logout`,
+      `/api/${enc(session)}/logout`
+    ],
+    { method: 'POST', timeout }
+  );
+}
+
+// Send plain text (session goes in the body on modern WAHA)
+function wahaSendText(session, chatId, text, timeout = 60000) {
+  return wahaTry(
+    [
+      `/api/sendText`,
+      `/api/sessions/${enc(session)}/sendText`
+    ],
+    { method: 'POST', body: { session, chatId, text }, timeout }
+  );
+}
+
+// Send an image with caption
+function wahaSendImage(session, chatId, file, caption, timeout = 60000) {
+  return wahaTry(
+    [
+      `/api/sendImage`,
+      `/api/sessions/${enc(session)}/sendImage`
+    ],
+    { method: 'POST', body: { session, chatId, file, caption }, timeout }
+  );
+}
+
+
 async function ensureAdmin() {
   const [rows] = await pool.query('SELECT id FROM users WHERE email = ?', [ADMIN_EMAIL]);
   if (rows.length === 0) {
@@ -155,7 +273,11 @@ app.listen(PORT, async () => {
 });
 
 // Export for route modules (loaded after listen to avoid ordering issues)
-module.exports = { app, pool, wahaRequest, cleanPhone, phoneToJid, normalizeJidToPhone, signToken, authRequired, WAHA_BASE_URL };
+module.exports = {
+  app, pool, wahaRequest, cleanPhone, phoneToJid, normalizeJidToPhone, signToken, authRequired, WAHA_BASE_URL,
+  wahaGroups, wahaGroupDetail, wahaChats, wahaChatMessages, wahaQr,
+  wahaStartSession, wahaLogoutSession, wahaSendText, wahaSendImage
+};
 
 // Load routes
 require('./routes/auth');

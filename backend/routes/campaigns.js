@@ -4,7 +4,7 @@
    Supports "only prior interactions" filter (new feature).
 */
 const { Router } = require('express');
-const { app, pool, wahaRequest, cleanPhone, phoneToJid, authRequired } = require('../server');
+const { app, pool, wahaSendText, wahaSendImage, cleanPhone, phoneToJid, authRequired } = require('../server');
 
 const router = Router();
 router.use(authRequired);
@@ -101,15 +101,9 @@ async function runCampaign({ campaignId, waha_session, is_test, test_phone }) {
     try {
       const hasMedia = !!(camp.media_url && camp.media_url.trim());
       if (hasMedia) {
-        await wahaRequest(`/api/sessions/${encodeURIComponent(session)}/sendImage`, {
-          method: 'POST',
-          body: { chatId, file: camp.media_url, caption: camp.message_text }
-        });
+        await wahaSendImage(session, chatId, camp.media_url, camp.message_text);
       } else {
-        await wahaRequest(`/api/sessions/${encodeURIComponent(session)}/sendText`, {
-          method: 'POST',
-          body: { chatId, text: camp.message_text }
-        });
+        await wahaSendText(session, chatId, camp.message_text);
       }
       await pool.query(
         'INSERT INTO message_logs (campaign_id, contact_id, phone, contact_name, channel, status, sent_at) VALUES (?, ?, ?, ?, ?, ?, NOW())',

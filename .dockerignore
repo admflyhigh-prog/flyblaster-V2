@@ -1,6 +1,32 @@
-.git
-node_modules
-.DS_Store
+# The web image only needs the static frontend.
+# Everything below must be excluded or it becomes publicly downloadable
+# from nginx (e.g. /backend/.env would expose DB + JWT secrets).
+
+# Backend source & secrets
+backend
+**/.env
+**/.env.*
+
+# Infra & tooling
 Dockerfile
 .dockerignore
+.gitignore
+docker-compose*.yml
+.git
+.github
+node_modules
+.claude
+
+# Docs & dev scripts
+*.md
+README.md
+
+# OS junk
+.DS_Store
+Thumbs.db
 *.log
+
+# Backups
+*.bak
+*.bak-*
+*.pre-*
