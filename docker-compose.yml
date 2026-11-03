@@ -15,7 +15,6 @@ services:
       - ./backend/schema.sql:/docker-entrypoint-initdb.d/01-schema.sql:ro
     networks:
       - flyblaster-net
-
   flyblaster-waha:
     image: devlikeapro/waha
     container_name: flyblaster-waha
